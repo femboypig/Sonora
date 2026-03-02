@@ -16,20 +16,9 @@ private enum M2WidgetConfig {
     static let deepLinkTrackIDQueryItem = "trackID"
 }
 
-enum M2WidgetSongSource: String, AppEnum {
+enum M2WidgetSongSource: String {
     case lovely
     case random
-
-    static var typeDisplayRepresentation: TypeDisplayRepresentation {
-        TypeDisplayRepresentation(name: "Song Source")
-    }
-
-    static var caseDisplayRepresentations: [M2WidgetSongSource: DisplayRepresentation] {
-        [
-            .lovely: DisplayRepresentation(title: "Lovely"),
-            .random: DisplayRepresentation(title: "Random")
-        ]
-    }
 
     var title: String {
         switch self {
@@ -41,6 +30,21 @@ enum M2WidgetSongSource: String, AppEnum {
     }
 }
 
+@available(iOSApplicationExtension 17.0, *)
+extension M2WidgetSongSource: AppEnum {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation {
+        TypeDisplayRepresentation(name: "Song Source")
+    }
+
+    static var caseDisplayRepresentations: [M2WidgetSongSource: DisplayRepresentation] {
+        [
+            .lovely: DisplayRepresentation(title: "Lovely"),
+            .random: DisplayRepresentation(title: "Random")
+        ]
+    }
+}
+
+@available(iOSApplicationExtension 17.0, *)
 struct M2WidgetConfigurationIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource { "M2 Widget" }
     static var description: IntentDescription { IntentDescription("Choose whether the widget shows lovely songs or random songs.") }
@@ -67,38 +71,8 @@ private struct LovelyEntry: TimelineEntry {
     let track: LovelyTrack?
 }
 
-private struct LovelyProvider: AppIntentTimelineProvider {
-    typealias Intent = M2WidgetConfigurationIntent
-
-    func placeholder(in context: Context) -> LovelyEntry {
-        LovelyEntry(date: Date(),
-                    source: .lovely,
-                    track: LovelyTrack(id: "placeholder",
-                                       title: "Lovely Song",
-                                       artist: "M2",
-                                       artworkURL: nil,
-                                       artworkThumb: nil))
-    }
-
-    func snapshot(for configuration: M2WidgetConfigurationIntent, in context: Context) async -> LovelyEntry {
-        makeEntry(for: Date(), source: configuration.source ?? .lovely, preview: context.isPreview)
-    }
-
-    func timeline(for configuration: M2WidgetConfigurationIntent, in context: Context) async -> Timeline<LovelyEntry> {
-        let now = Date()
-        let source = configuration.source ?? .lovely
-        var entries: [LovelyEntry] = []
-
-        for step in 0..<8 {
-            let date = Calendar.current.date(byAdding: .minute, value: step * 30, to: now) ?? now
-            entries.append(makeEntry(for: date, source: source, preview: context.isPreview))
-        }
-
-        let nextUpdate = Calendar.current.date(byAdding: .minute, value: 30, to: now) ?? now.addingTimeInterval(1800)
-        return Timeline(entries: entries, policy: .after(nextUpdate))
-    }
-
-    private func makeEntry(for date: Date, source: M2WidgetSongSource, preview: Bool) -> LovelyEntry {
+private enum LovelyEntryFactory {
+    static func makeEntry(for date: Date, source: M2WidgetSongSource, preview: Bool) -> LovelyEntry {
         let tracks = sharedTracks(for: source)
         if let track = tracks.randomElement() {
             return LovelyEntry(date: date, source: source, track: track)
@@ -117,7 +91,21 @@ private struct LovelyProvider: AppIntentTimelineProvider {
         return LovelyEntry(date: date, source: source, track: nil)
     }
 
-    private func sharedTracks(for source: M2WidgetSongSource) -> [LovelyTrack] {
+    static func defaultSource() -> M2WidgetSongSource {
+        let lovely = sharedTracks(for: .lovely)
+        if !lovely.isEmpty {
+            return .lovely
+        }
+
+        let random = sharedTracks(for: .random)
+        if !random.isEmpty {
+            return .random
+        }
+
+        return .lovely
+    }
+
+    private static func sharedTracks(for source: M2WidgetSongSource) -> [LovelyTrack] {
         switch source {
         case .lovely:
             let lovely = loadTracks(key: M2WidgetConfig.lovelyTracksDefaultsKey)
@@ -134,7 +122,7 @@ private struct LovelyProvider: AppIntentTimelineProvider {
         }
     }
 
-    private func loadTracks(key: String) -> [LovelyTrack] {
+    private static func loadTracks(key: String) -> [LovelyTrack] {
         guard let defaults = UserDefaults(suiteName: M2WidgetConfig.appGroupID),
               let rawTracks = defaults.array(forKey: key) as? [[String: Any]] else {
             return []
@@ -165,7 +153,7 @@ private struct LovelyProvider: AppIntentTimelineProvider {
         }
     }
 
-    private func widgetArtworkURL(fileName: String) -> URL? {
+    private static func widgetArtworkURL(fileName: String) -> URL? {
         guard !fileName.isEmpty,
               let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: M2WidgetConfig.appGroupID) else {
             return nil
@@ -174,6 +162,70 @@ private struct LovelyProvider: AppIntentTimelineProvider {
         return containerURL
             .appendingPathComponent(M2WidgetConfig.artworkDirectoryName, isDirectory: true)
             .appendingPathComponent(fileName, isDirectory: false)
+    }
+}
+
+@available(iOSApplicationExtension 17.0, *)
+private struct LovelyIntentProvider: AppIntentTimelineProvider {
+    typealias Intent = M2WidgetConfigurationIntent
+
+    func placeholder(in context: Context) -> LovelyEntry {
+        LovelyEntry(date: Date(),
+                    source: .lovely,
+                    track: LovelyTrack(id: "placeholder",
+                                       title: "Lovely Song",
+                                       artist: "M2",
+                                       artworkURL: nil,
+                                       artworkThumb: nil))
+    }
+
+    func snapshot(for configuration: M2WidgetConfigurationIntent, in context: Context) async -> LovelyEntry {
+        LovelyEntryFactory.makeEntry(for: Date(), source: configuration.source ?? .lovely, preview: context.isPreview)
+    }
+
+    func timeline(for configuration: M2WidgetConfigurationIntent, in context: Context) async -> Timeline<LovelyEntry> {
+        let now = Date()
+        let source = configuration.source ?? .lovely
+        var entries: [LovelyEntry] = []
+
+        for step in 0..<8 {
+            let date = Calendar.current.date(byAdding: .minute, value: step * 30, to: now) ?? now
+            entries.append(LovelyEntryFactory.makeEntry(for: date, source: source, preview: context.isPreview))
+        }
+
+        let nextUpdate = Calendar.current.date(byAdding: .minute, value: 30, to: now) ?? now.addingTimeInterval(1800)
+        return Timeline(entries: entries, policy: .after(nextUpdate))
+    }
+}
+
+private struct LovelyLegacyProvider: TimelineProvider {
+    func placeholder(in context: Context) -> LovelyEntry {
+        LovelyEntry(date: Date(),
+                    source: .lovely,
+                    track: LovelyTrack(id: "placeholder",
+                                       title: "Lovely Song",
+                                       artist: "M2",
+                                       artworkURL: nil,
+                                       artworkThumb: nil))
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (LovelyEntry) -> Void) {
+        let source = LovelyEntryFactory.defaultSource()
+        completion(LovelyEntryFactory.makeEntry(for: Date(), source: source, preview: context.isPreview))
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<LovelyEntry>) -> Void) {
+        let now = Date()
+        let source = LovelyEntryFactory.defaultSource()
+        var entries: [LovelyEntry] = []
+
+        for step in 0..<8 {
+            let date = Calendar.current.date(byAdding: .minute, value: step * 30, to: now) ?? now
+            entries.append(LovelyEntryFactory.makeEntry(for: date, source: source, preview: context.isPreview))
+        }
+
+        let nextUpdate = Calendar.current.date(byAdding: .minute, value: 30, to: now) ?? now.addingTimeInterval(1800)
+        completion(Timeline(entries: entries, policy: .after(nextUpdate)))
     }
 }
 
@@ -249,7 +301,7 @@ private struct LovelyWidgetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         .widgetURL(widgetURL)
-        .containerBackground(for: .widget) {
+        .m2WidgetContainerBackground {
             background
         }
         .m2WidgetTint(Color.clear)
@@ -286,13 +338,14 @@ private struct LovelyWidgetView: View {
     }
 }
 
+@available(iOSApplicationExtension 17.0, *)
 struct M2LovelyWidget: Widget {
     private let kind = "M2LovelyWidget"
 
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: kind,
                                intent: M2WidgetConfigurationIntent.self,
-                               provider: LovelyProvider()) { entry in
+                               provider: LovelyIntentProvider()) { entry in
             LovelyWidgetView(entry: entry)
                 .m2WidgetAccentable(false)
         }
@@ -303,10 +356,25 @@ struct M2LovelyWidget: Widget {
     }
 }
 
+struct M2LovelyWidgetLegacy: Widget {
+    private let kind = "M2LovelyWidget"
+
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: kind, provider: LovelyLegacyProvider()) { entry in
+            LovelyWidgetView(entry: entry)
+                .m2WidgetAccentable(false)
+        }
+        .contentMarginsDisabled()
+        .configurationDisplayName("M2 Song")
+        .description("Shows songs prepared in M2.")
+        .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
 private extension View {
     @ViewBuilder
     func m2WidgetAccentable(_ accentable: Bool) -> some View {
-        if #available(iOS 17.0, *) {
+        if #available(iOSApplicationExtension 17.0, *) {
             self.widgetAccentable(accentable)
         } else {
             self
@@ -315,11 +383,19 @@ private extension View {
 
     @ViewBuilder
     func m2WidgetTint(_ tint: Color) -> some View {
-        if #available(iOS 17.0, *) {
+        if #available(iOSApplicationExtension 17.0, *) {
             self.tint(tint)
         } else {
             self
         }
     }
 
+    @ViewBuilder
+    func m2WidgetContainerBackground<Background: View>(@ViewBuilder _ background: () -> Background) -> some View {
+        if #available(iOSApplicationExtension 17.0, *) {
+            self.containerBackground(for: .widget, content: background)
+        } else {
+            self.background(background())
+        }
+    }
 }

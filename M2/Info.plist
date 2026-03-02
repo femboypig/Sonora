@@ -18,6 +18,7 @@
 	<key>UIAppFonts</key>
 	<array>
 		<string>YSMusic-HeadlineBold.ttf</string>
+		<string>TTCommonsProExp-ExtraBold.otf</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

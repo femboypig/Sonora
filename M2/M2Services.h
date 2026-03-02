@@ -86,6 +86,17 @@ typedef NS_ENUM(NSInteger, M2RepeatMode) {
 
 @end
 
+@interface M2PlaybackHistoryStore : NSObject
+
++ (instancetype)sharedStore;
+
+- (void)recordTrackID:(NSString *)trackID;
+- (NSArray<NSString *> *)recentTrackIDsWithLimit:(NSUInteger)limit;
+- (NSArray<M2Track *> *)recentTracksWithLibrary:(M2LibraryManager *)library
+                                          limit:(NSUInteger)limit;
+
+@end
+
 @interface M2SleepTimerManager : NSObject
 
 + (instancetype)sharedManager;

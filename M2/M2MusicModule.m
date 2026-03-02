@@ -196,6 +196,92 @@ static NSArray<M2Playlist *> *M2FilterPlaylistsByQuery(NSArray<M2Playlist *> *pl
     return [filtered copy];
 }
 
+static NSArray<NSString *> *M2ArtistParticipantsFromText(NSString *artistText) {
+    NSString *trimmed = [artistText stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0) {
+        return @[];
+    }
+
+    NSMutableArray<NSString *> *values = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    NSArray<NSString *> *chunks = [trimmed componentsSeparatedByString:@","];
+    for (NSString *chunk in chunks) {
+        NSString *value = [chunk stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *key = M2NormalizedSearchText(value);
+        if (key.length == 0 || [seen containsObject:key]) {
+            continue;
+        }
+        [seen addObject:key];
+        [values addObject:value];
+    }
+    return values;
+}
+
+static NSArray<NSDictionary<NSString *, id> *> *M2BuildArtistSearchResults(NSArray<M2Track *> *tracks,
+                                                                            NSString *query,
+                                                                            NSUInteger limit) {
+    NSString *normalizedQuery = M2NormalizedSearchText(query);
+    if (tracks.count == 0 || limit == 0) {
+        return @[];
+    }
+
+    NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, id> *> *artistsByKey = [NSMutableDictionary dictionary];
+    for (M2Track *track in tracks) {
+        NSArray<NSString *> *participants = M2ArtistParticipantsFromText(track.artist ?: @"");
+        for (NSString *participant in participants) {
+            NSString *key = M2NormalizedSearchText(participant);
+            if (normalizedQuery.length > 0 && ![key containsString:normalizedQuery]) {
+                continue;
+            }
+
+            NSMutableDictionary<NSString *, id> *entry = artistsByKey[key];
+            if (entry == nil) {
+                entry = [@{
+                    @"key": key,
+                    @"title": participant,
+                    @"tracks": [NSMutableArray array]
+                } mutableCopy];
+                artistsByKey[key] = entry;
+            }
+            NSMutableArray<M2Track *> *matchedTracks = entry[@"tracks"];
+            if (matchedTracks == nil) {
+                matchedTracks = [NSMutableArray array];
+                entry[@"tracks"] = matchedTracks;
+            }
+            BOOL alreadyIncluded = NO;
+            for (M2Track *existing in matchedTracks) {
+                if ([existing.identifier isEqualToString:track.identifier]) {
+                    alreadyIncluded = YES;
+                    break;
+                }
+            }
+            if (!alreadyIncluded) {
+                [matchedTracks addObject:track];
+            }
+        }
+    }
+
+    NSArray<NSDictionary<NSString *, id> *> *sorted = [artistsByKey.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary<NSString *,id> * _Nonnull left,
+                                                                                                                             NSDictionary<NSString *,id> * _Nonnull right) {
+        NSArray *leftTracks = left[@"tracks"];
+        NSArray *rightTracks = right[@"tracks"];
+        if (leftTracks.count > rightTracks.count) {
+            return NSOrderedAscending;
+        }
+        if (leftTracks.count < rightTracks.count) {
+            return NSOrderedDescending;
+        }
+        NSString *leftTitle = left[@"title"] ?: @"";
+        NSString *rightTitle = right[@"title"] ?: @"";
+        return [leftTitle localizedCaseInsensitiveCompare:rightTitle];
+    }];
+
+    if (sorted.count <= limit) {
+        return sorted;
+    }
+    return [sorted subarrayWithRange:NSMakeRange(0, limit)];
+}
+
 static UISearchController *M2BuildSearchController(id<UISearchResultsUpdating> updater, NSString *placeholder) {
     UISearchController *searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
     searchController.obscuresBackgroundDuringPresentation = NO;
@@ -553,14 +639,166 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
 
 #pragma mark - Music
 
-@interface M2MusicViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating>
+typedef NS_ENUM(NSInteger, M2SearchSectionType) {
+    M2SearchSectionTypePlaylists = 0,
+    M2SearchSectionTypeArtists = 1,
+    M2SearchSectionTypeTracks = 2,
+};
+
+static NSString * const M2MusicSearchCardCellReuseID = @"M2MusicSearchCardCell";
+static NSString * const M2MusicSearchHeaderReuseID = @"M2MusicSearchHeader";
+
+@interface M2MusicSearchCardCell : UICollectionViewCell
+
+- (void)configureWithTitle:(NSString *)title subtitle:(NSString *)subtitle image:(UIImage * _Nullable)image;
+
+@end
+
+@interface M2MusicSearchCardCell ()
+
+@property (nonatomic, strong) UIImageView *coverView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+
+@end
+
+@implementation M2MusicSearchCardCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        [self setupUI];
+    }
+    return self;
+}
+
+- (void)setupUI {
+    self.contentView.backgroundColor = UIColor.clearColor;
+
+    UIImageView *coverView = [[UIImageView alloc] init];
+    coverView.translatesAutoresizingMaskIntoConstraints = NO;
+    coverView.contentMode = UIViewContentModeScaleAspectFill;
+    coverView.clipsToBounds = YES;
+    coverView.layer.cornerRadius = 12.0;
+    self.coverView = coverView;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.numberOfLines = 1;
+    self.titleLabel = titleLabel;
+
+    UILabel *subtitleLabel = [[UILabel alloc] init];
+    subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
+    subtitleLabel.textColor = UIColor.secondaryLabelColor;
+    subtitleLabel.numberOfLines = 1;
+    self.subtitleLabel = subtitleLabel;
+
+    [self.contentView addSubview:coverView];
+    [self.contentView addSubview:titleLabel];
+    [self.contentView addSubview:subtitleLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [coverView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+        [coverView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+        [coverView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+        [coverView.heightAnchor constraintEqualToAnchor:coverView.widthAnchor],
+
+        [titleLabel.topAnchor constraintEqualToAnchor:coverView.bottomAnchor constant:8.0],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+
+        [subtitleLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:2.0],
+        [subtitleLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+        [subtitleLabel.trailingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor]
+    ]];
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.coverView.image = nil;
+    self.coverView.tintColor = nil;
+    self.coverView.backgroundColor = UIColor.clearColor;
+    self.coverView.contentMode = UIViewContentModeScaleAspectFill;
+    self.titleLabel.text = nil;
+    self.subtitleLabel.text = nil;
+}
+
+- (void)configureWithTitle:(NSString *)title subtitle:(NSString *)subtitle image:(UIImage * _Nullable)image {
+    self.titleLabel.text = title ?: @"";
+    self.subtitleLabel.text = subtitle ?: @"";
+    if (image != nil) {
+        self.coverView.contentMode = UIViewContentModeScaleAspectFill;
+        self.coverView.image = image;
+    } else {
+        UIImage *placeholder = [UIImage systemImageNamed:@"music.note"];
+        self.coverView.contentMode = UIViewContentModeCenter;
+        self.coverView.image = placeholder;
+        self.coverView.tintColor = UIColor.secondaryLabelColor;
+        self.coverView.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+            if (trait.userInterfaceStyle == UIUserInterfaceStyleDark) {
+                return [UIColor colorWithWhite:1.0 alpha:0.08];
+            }
+            return [UIColor colorWithWhite:0.0 alpha:0.04];
+        }];
+    }
+}
+
+@end
+
+@interface M2MusicSearchHeaderView : UICollectionReusableView
+
+- (void)configureWithTitle:(NSString *)title;
+
+@end
+
+@interface M2MusicSearchHeaderView ()
+
+@property (nonatomic, strong) UILabel *titleLabel;
+
+@end
+
+@implementation M2MusicSearchHeaderView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        UILabel *label = [[UILabel alloc] init];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.font = M2HeadlineFont(24.0);
+        label.textColor = UIColor.labelColor;
+        self.titleLabel = label;
+        [self addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:0.0],
+            [label.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-2.0]
+        ]];
+    }
+    return self;
+}
+
+- (void)configureWithTitle:(NSString *)title {
+    self.titleLabel.text = title ?: @"";
+}
+
+@end
+
+@interface M2MusicViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating, UICollectionViewDataSource, UICollectionViewDelegate>
 
 @property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UICollectionView *searchCollectionView;
 @property (nonatomic, copy) NSArray<M2Track *> *tracks;
 @property (nonatomic, copy) NSArray<M2Track *> *filteredTracks;
+@property (nonatomic, copy) NSArray<M2Playlist *> *playlists;
+@property (nonatomic, copy) NSArray<M2Playlist *> *filteredPlaylists;
+@property (nonatomic, copy) NSArray<NSDictionary<NSString *, id> *> *artistResults;
+@property (nonatomic, copy) NSArray<NSNumber *> *visibleSections;
 @property (nonatomic, copy) NSString *searchQuery;
 @property (nonatomic, strong) UISearchController *searchController;
 @property (nonatomic, assign) BOOL searchControllerAttached;
+@property (nonatomic, assign) BOOL musicOnlyMode;
 
 @end
 
@@ -569,25 +807,40 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.title = @"Music";
+    NSString *pageTitle = self.musicOnlyMode ? @"Music" : @"Search";
+    self.title = pageTitle;
     self.navigationItem.title = nil;
     self.navigationItem.titleView = nil;
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:M2WhiteSectionTitleLabel(@"Music")];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:M2WhiteSectionTitleLabel(pageTitle)];
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     self.view.backgroundColor = UIColor.systemBackgroundColor;
+    if (self.musicOnlyMode) {
+        self.navigationItem.hidesBackButton = YES;
+    }
+
+    if (self.musicOnlyMode) {
+        UISwipeGestureRecognizer *swipeRight = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleDismissSwipe)];
+        swipeRight.direction = UISwipeGestureRecognizerDirectionRight;
+        [self.view addGestureRecognizer:swipeRight];
+    }
 
     [self setupTableView];
+    [self setupSearchCollectionView];
     [self setupSearch];
+    [self updatePresentationMode];
 
-    UIBarButtonItem *reloadItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.clockwise"]
-                                                                    style:UIBarButtonItemStylePlain
-                                                                   target:self
-                                                                   action:@selector(reloadTracks)];
-    UIBarButtonItem *searchItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]
-                                                                    style:UIBarButtonItemStylePlain
-                                                                   target:self
-                                                                   action:@selector(searchButtonTapped)];
-    self.navigationItem.rightBarButtonItems = @[searchItem, reloadItem];
+    if (self.musicOnlyMode) {
+        UIBarButtonItem *addItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
+                                                                                   target:self
+                                                                                   action:@selector(addMusicTapped)];
+        UIBarButtonItem *searchItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]
+                                                                        style:UIBarButtonItemStylePlain
+                                                                       target:self
+                                                                       action:@selector(searchButtonTapped)];
+        self.navigationItem.rightBarButtonItems = @[searchItem, addItem];
+    } else {
+        self.navigationItem.rightBarButtonItems = nil;
+    }
 
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(handlePlaybackChanged)
@@ -597,6 +850,10 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(reloadTracks)
                                                name:UIApplicationWillEnterForegroundNotification
+                                             object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(handlePlaylistsChanged)
+                                               name:M2PlaylistsDidChangeNotification
                                              object:nil];
 
     [self reloadTracks];
@@ -608,8 +865,31 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    if (self.musicOnlyMode) {
+        self.navigationItem.hidesBackButton = YES;
+        self.navigationController.interactivePopGestureRecognizer.enabled = YES;
+        self.navigationController.interactivePopGestureRecognizer.delegate = nil;
+        UIBarButtonItem *addItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
+                                                                                   target:self
+                                                                                   action:@selector(addMusicTapped)];
+        UIBarButtonItem *searchItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]
+                                                                        style:UIBarButtonItemStylePlain
+                                                                       target:self
+                                                                       action:@selector(searchButtonTapped)];
+        self.navigationItem.rightBarButtonItems = @[searchItem, addItem];
+    } else {
+        self.navigationItem.rightBarButtonItems = nil;
+    }
+    [self updatePresentationMode];
     [self updateSearchControllerAttachment];
     [self.tableView reloadData];
+    [self.searchCollectionView reloadData];
+}
+
+- (void)handleDismissSwipe {
+    if (self.navigationController) {
+        [self.navigationController popViewControllerAnimated:YES];
+    }
 }
 
 - (void)setupTableView {
@@ -638,18 +918,104 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
     ]];
 }
 
+- (void)setupSearchCollectionView {
+    UICollectionViewCompositionalLayout *layout = [self buildSearchCollectionLayout];
+    UICollectionView *collectionView = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
+    collectionView.translatesAutoresizingMaskIntoConstraints = NO;
+    collectionView.backgroundColor = UIColor.systemBackgroundColor;
+    collectionView.alwaysBounceVertical = YES;
+    collectionView.dataSource = self;
+    collectionView.delegate = self;
+
+    [collectionView registerClass:M2MusicSearchCardCell.class forCellWithReuseIdentifier:M2MusicSearchCardCellReuseID];
+    [collectionView registerClass:M2MusicSearchHeaderView.class
+       forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
+              withReuseIdentifier:M2MusicSearchHeaderReuseID];
+
+    self.searchCollectionView = collectionView;
+    [self.view addSubview:collectionView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [collectionView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [collectionView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [collectionView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [collectionView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+    ]];
+}
+
+- (void)updatePresentationMode {
+    self.tableView.hidden = !self.musicOnlyMode;
+    self.searchCollectionView.hidden = self.musicOnlyMode;
+}
+
+- (UICollectionViewCompositionalLayout *)buildSearchCollectionLayout {
+    __weak typeof(self) weakSelf = self;
+    return [[UICollectionViewCompositionalLayout alloc] initWithSectionProvider:^NSCollectionLayoutSection * _Nullable(NSInteger sectionIndex,
+                                                                                                                        __unused id<NSCollectionLayoutEnvironment> _Nonnull environment) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return nil;
+        }
+        return [strongSelf searchSectionLayout];
+    }];
+}
+
+- (NSCollectionLayoutSection *)searchSectionLayout {
+    NSCollectionLayoutSize *itemSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension absoluteDimension:184.0]
+                                                                       heightDimension:[NSCollectionLayoutDimension absoluteDimension:246.0]];
+    NSCollectionLayoutItem *item = [NSCollectionLayoutItem itemWithLayoutSize:itemSize];
+
+    NSCollectionLayoutSize *groupSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension absoluteDimension:184.0]
+                                                                        heightDimension:[NSCollectionLayoutDimension absoluteDimension:246.0]];
+    NSCollectionLayoutGroup *group = [NSCollectionLayoutGroup horizontalGroupWithLayoutSize:groupSize subitems:@[item]];
+
+    NSCollectionLayoutSection *section = [NSCollectionLayoutSection sectionWithGroup:group];
+    section.interGroupSpacing = 12.0;
+    section.contentInsets = NSDirectionalEdgeInsetsMake(10.0, 18.0, 12.0, 18.0);
+    section.orthogonalScrollingBehavior = UICollectionLayoutSectionOrthogonalScrollingBehaviorContinuousGroupLeadingBoundary;
+
+    NSCollectionLayoutSize *headerSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension fractionalWidthDimension:1.0]
+                                                                         heightDimension:[NSCollectionLayoutDimension estimatedDimension:36.0]];
+    NSCollectionLayoutBoundarySupplementaryItem *header = [NSCollectionLayoutBoundarySupplementaryItem
+                                                           boundarySupplementaryItemWithLayoutSize:headerSize
+                                                           elementKind:UICollectionElementKindSectionHeader
+                                                           alignment:NSRectAlignmentTop];
+    header.contentInsets = NSDirectionalEdgeInsetsMake(0.0, 10.0, 0.0, 18.0);
+    section.boundarySupplementaryItems = @[header];
+    return section;
+}
+
 - (void)setupSearch {
-    self.searchController = M2BuildSearchController(self, @"Search Music");
-    self.navigationItem.searchController = nil;
-    self.navigationItem.hidesSearchBarWhenScrolling = YES;
+    self.searchController = M2BuildSearchController(self, @"Search");
     self.definesPresentationContext = YES;
-    self.searchControllerAttached = NO;
+    if (self.musicOnlyMode) {
+        self.navigationItem.searchController = nil;
+        self.navigationItem.hidesSearchBarWhenScrolling = YES;
+        self.searchControllerAttached = NO;
+    } else {
+        self.navigationItem.searchController = self.searchController;
+        self.navigationItem.hidesSearchBarWhenScrolling = NO;
+        self.searchControllerAttached = YES;
+    }
 }
 
 - (void)updateSearchControllerAttachment {
+    if (!self.musicOnlyMode) {
+        if (!self.searchControllerAttached || self.navigationItem.searchController != self.searchController) {
+            self.searchControllerAttached = YES;
+            M2ApplySearchControllerAttachment(self.navigationItem,
+                                              self.navigationController.navigationBar,
+                                              self.searchController,
+                                              YES,
+                                              (self.view.window != nil));
+        }
+        return;
+    }
+
+    UIScrollView *targetScroll = self.musicOnlyMode ? self.tableView : self.searchCollectionView;
     BOOL shouldAttach = M2ShouldAttachSearchController(self.searchControllerAttached,
                                                        self.searchController,
-                                                       self.tableView,
+                                                       targetScroll,
                                                        M2SearchRevealThreshold);
     if (shouldAttach == self.searchControllerAttached) {
         return;
@@ -664,14 +1030,59 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
 }
 
 - (void)applySearchFilterAndReload {
-    self.filteredTracks = M2FilterTracksByQuery(self.tracks, self.searchQuery);
+    NSString *normalizedQuery = M2NormalizedSearchText(self.searchQuery);
+    self.playlists = M2PlaylistStore.sharedStore.playlists ?: @[];
+    if (self.musicOnlyMode) {
+        self.filteredTracks = M2FilterTracksByQuery(self.tracks, self.searchQuery);
+        self.filteredPlaylists = @[];
+        self.artistResults = @[];
+    } else {
+        NSArray<M2Track *> *queryTracks = M2FilterTracksByQuery(self.tracks, self.searchQuery);
+        if (normalizedQuery.length == 0) {
+            NSArray<M2Track *> *affinityTracks = [M2TrackAnalyticsStore.sharedStore tracksSortedByAffinity:self.tracks] ?: @[];
+            queryTracks = affinityTracks.count > 0 ? affinityTracks : self.tracks;
+        }
+        if (queryTracks.count > 24) {
+            self.filteredTracks = [queryTracks subarrayWithRange:NSMakeRange(0, 24)];
+        } else {
+            self.filteredTracks = queryTracks;
+        }
+
+        self.filteredPlaylists = M2FilterPlaylistsByQuery(self.playlists, self.searchQuery);
+        if (self.filteredPlaylists.count > 10) {
+            self.filteredPlaylists = [self.filteredPlaylists subarrayWithRange:NSMakeRange(0, 10)];
+        }
+        self.artistResults = M2BuildArtistSearchResults(self.tracks, self.searchQuery, 12);
+    }
+
+    NSMutableArray<NSNumber *> *sections = [NSMutableArray array];
+    if (self.musicOnlyMode) {
+        [sections addObject:@(M2SearchSectionTypeTracks)];
+    } else {
+        if (self.filteredPlaylists.count > 0) {
+            [sections addObject:@(M2SearchSectionTypePlaylists)];
+        }
+        if (self.artistResults.count > 0) {
+            [sections addObject:@(M2SearchSectionTypeArtists)];
+        }
+        if (self.filteredTracks.count > 0) {
+            [sections addObject:@(M2SearchSectionTypeTracks)];
+        }
+    }
+    self.visibleSections = [sections copy];
+
     [self.tableView reloadData];
+    [self.searchCollectionView reloadData];
     [self updateEmptyState];
 }
 
 - (void)updateEmptyState {
-    if (self.filteredTracks.count > 0) {
+    BOOL hasAnyResult = (self.filteredTracks.count > 0 ||
+                         self.filteredPlaylists.count > 0 ||
+                         self.artistResults.count > 0);
+    if (hasAnyResult) {
         self.tableView.backgroundView = nil;
+        self.searchCollectionView.backgroundView = nil;
         return;
     }
 
@@ -686,11 +1097,25 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
     } else {
         label.text = @"No search results.";
     }
-    self.tableView.backgroundView = label;
+    if (self.musicOnlyMode) {
+        self.tableView.backgroundView = label;
+        self.searchCollectionView.backgroundView = nil;
+    } else {
+        self.searchCollectionView.backgroundView = label;
+        self.tableView.backgroundView = nil;
+    }
 }
 
 - (void)reloadTracks {
     self.tracks = [M2LibraryManager.sharedManager reloadTracks];
+    [M2PlaylistStore.sharedStore reloadPlaylists];
+    self.playlists = M2PlaylistStore.sharedStore.playlists ?: @[];
+    [self applySearchFilterAndReload];
+}
+
+- (void)handlePlaylistsChanged {
+    [M2PlaylistStore.sharedStore reloadPlaylists];
+    self.playlists = M2PlaylistStore.sharedStore.playlists ?: @[];
     [self applySearchFilterAndReload];
 }
 
@@ -724,25 +1149,110 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
     });
 }
 
+- (void)addMusicTapped {
+    [self reloadTracks];
+}
+
+- (M2SearchSectionType)sectionTypeForIndex:(NSInteger)section {
+    if (section < 0 || section >= self.visibleSections.count) {
+        return M2SearchSectionTypeTracks;
+    }
+    return (M2SearchSectionType)self.visibleSections[section].integerValue;
+}
+
 #pragma mark - UITableViewDataSource
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    if (!self.musicOnlyMode) {
+        return 0;
+    }
+    return self.visibleSections.count;
+}
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    (void)section;
-    return self.filteredTracks.count;
+    if (!self.musicOnlyMode) {
+        return 0;
+    }
+    switch ([self sectionTypeForIndex:section]) {
+        case M2SearchSectionTypePlaylists:
+            return self.filteredPlaylists.count;
+        case M2SearchSectionTypeArtists:
+            return self.artistResults.count;
+        case M2SearchSectionTypeTracks:
+            return self.filteredTracks.count;
+    }
+    return 0;
+}
+
+- (nullable NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    if (!self.musicOnlyMode) {
+        return nil;
+    }
+    NSString *normalizedQuery = M2NormalizedSearchText(self.searchQuery);
+    if (normalizedQuery.length == 0) {
+        return nil;
+    }
+    switch ([self sectionTypeForIndex:section]) {
+        case M2SearchSectionTypePlaylists:
+            return @"Playlists";
+        case M2SearchSectionTypeArtists:
+            return @"Artists";
+        case M2SearchSectionTypeTracks:
+            return @"Tracks";
+    }
+    return nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    M2TrackCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MusicTrackCell" forIndexPath:indexPath];
+    if (!self.musicOnlyMode) {
+        return [UITableViewCell new];
+    }
+    M2SearchSectionType sectionType = [self sectionTypeForIndex:indexPath.section];
+    if (sectionType == M2SearchSectionTypeTracks) {
+        M2TrackCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MusicTrackCell" forIndexPath:indexPath];
 
-    M2PlaybackManager *playback = M2PlaybackManager.sharedManager;
-    M2Track *track = self.filteredTracks[indexPath.row];
-    M2Track *currentTrack = playback.currentTrack;
-    BOOL isCurrent = (currentTrack != nil && [currentTrack.identifier isEqualToString:track.identifier]);
-    BOOL sameQueue = M2TrackQueuesMatchByIdentifier(playback.currentQueue, self.tracks);
-    BOOL showsPlaybackIndicator = (sameQueue && isCurrent && playback.isPlaying);
+        M2PlaybackManager *playback = M2PlaybackManager.sharedManager;
+        M2Track *track = self.filteredTracks[indexPath.row];
+        M2Track *currentTrack = playback.currentTrack;
+        BOOL isCurrent = (currentTrack != nil && [currentTrack.identifier isEqualToString:track.identifier]);
+        BOOL sameQueue = M2TrackQueuesMatchByIdentifier(playback.currentQueue, self.tracks);
+        BOOL showsPlaybackIndicator = (sameQueue && isCurrent && playback.isPlaying);
 
-    [cell configureWithTrack:track isCurrent:isCurrent showsPlaybackIndicator:showsPlaybackIndicator];
+        [cell configureWithTrack:track isCurrent:isCurrent showsPlaybackIndicator:showsPlaybackIndicator];
+        return cell;
+    }
+
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MusicSearchMetaCell"];
+    if (cell == nil) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"MusicSearchMetaCell"];
+    }
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.textLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
+    cell.textLabel.textColor = UIColor.labelColor;
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+
+    if (sectionType == M2SearchSectionTypePlaylists) {
+        if (indexPath.row < self.filteredPlaylists.count) {
+            M2Playlist *playlist = self.filteredPlaylists[indexPath.row];
+            cell.imageView.image = [UIImage systemImageNamed:@"music.note.list"];
+            cell.textLabel.text = playlist.name ?: @"Playlist";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld tracks", (long)playlist.trackIDs.count];
+        }
+    } else if (sectionType == M2SearchSectionTypeArtists) {
+        if (indexPath.row < self.artistResults.count) {
+            NSDictionary<NSString *, id> *artistEntry = self.artistResults[indexPath.row];
+            NSArray *matchedTracks = artistEntry[@"tracks"];
+            cell.imageView.image = [UIImage systemImageNamed:@"person.fill"];
+            cell.textLabel.text = artistEntry[@"title"] ?: @"Artist";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld tracks", (long)matchedTracks.count];
+        }
+    }
+
     return cell;
 }
 
@@ -750,6 +1260,33 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (!self.musicOnlyMode) {
+        return;
+    }
+
+    M2SearchSectionType sectionType = [self sectionTypeForIndex:indexPath.section];
+    if (sectionType == M2SearchSectionTypePlaylists) {
+        if (indexPath.row >= self.filteredPlaylists.count) {
+            return;
+        }
+        M2Playlist *playlist = self.filteredPlaylists[indexPath.row];
+        M2PlaylistDetailViewController *detail = [[M2PlaylistDetailViewController alloc] initWithPlaylistID:playlist.playlistID];
+        detail.hidesBottomBarWhenPushed = YES;
+        [self.navigationController pushViewController:detail animated:YES];
+        return;
+    }
+
+    if (sectionType == M2SearchSectionTypeArtists) {
+        if (indexPath.row >= self.artistResults.count) {
+            return;
+        }
+        NSDictionary<NSString *, id> *artistEntry = self.artistResults[indexPath.row];
+        NSString *artistTitle = artistEntry[@"title"] ?: @"";
+        self.searchQuery = artistTitle;
+        self.searchController.searchBar.text = artistTitle;
+        [self applySearchFilterAndReload];
+        return;
+    }
 
     if (indexPath.row >= self.filteredTracks.count) {
         return;
@@ -785,7 +1322,11 @@ static void M2PresentSleepTimerActionSheet(UIViewController *controller,
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
 trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
-    if (indexPath.row >= self.filteredTracks.count) {
+    if (!self.musicOnlyMode) {
+        return [UISwipeActionsConfiguration configurationWithActions:@[]];
+    }
+    if ([self sectionTypeForIndex:indexPath.section] != M2SearchSectionTypeTracks ||
+        indexPath.row >= self.filteredTracks.count) {
         return [UISwipeActionsConfiguration configurationWithActions:@[]];
     }
 
@@ -831,7 +1372,11 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
 leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
-    if (indexPath.row >= self.filteredTracks.count) {
+    if (!self.musicOnlyMode) {
+        return [UISwipeActionsConfiguration configurationWithActions:@[]];
+    }
+    if ([self sectionTypeForIndex:indexPath.section] != M2SearchSectionTypeTracks ||
+        indexPath.row >= self.filteredTracks.count) {
         return [UISwipeActionsConfiguration configurationWithActions:@[]];
     }
 
@@ -859,13 +1404,163 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     return configuration;
 }
 
+- (NSString *)titleForSearchSectionType:(M2SearchSectionType)sectionType {
+    switch (sectionType) {
+        case M2SearchSectionTypePlaylists:
+            return @"Playlists";
+        case M2SearchSectionTypeArtists:
+            return @"Artists";
+        case M2SearchSectionTypeTracks:
+            return @"Music";
+    }
+    return @"";
+}
+
+#pragma mark - UICollectionViewDataSource
+
+- (NSInteger)numberOfSectionsInCollectionView:(UICollectionView *)collectionView {
+    if (collectionView != self.searchCollectionView || self.musicOnlyMode) {
+        return 0;
+    }
+    return self.visibleSections.count;
+}
+
+- (NSInteger)collectionView:(UICollectionView *)collectionView numberOfItemsInSection:(NSInteger)section {
+    if (collectionView != self.searchCollectionView || self.musicOnlyMode) {
+        return 0;
+    }
+
+    switch ([self sectionTypeForIndex:section]) {
+        case M2SearchSectionTypePlaylists:
+            return self.filteredPlaylists.count;
+        case M2SearchSectionTypeArtists:
+            return self.artistResults.count;
+        case M2SearchSectionTypeTracks:
+            return self.filteredTracks.count;
+    }
+    return 0;
+}
+
+- (__kindof UICollectionViewCell *)collectionView:(UICollectionView *)collectionView
+                           cellForItemAtIndexPath:(NSIndexPath *)indexPath {
+    if (collectionView != self.searchCollectionView || self.musicOnlyMode) {
+        return [UICollectionViewCell new];
+    }
+
+    M2MusicSearchCardCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:M2MusicSearchCardCellReuseID
+                                                                             forIndexPath:indexPath];
+    M2SearchSectionType sectionType = [self sectionTypeForIndex:indexPath.section];
+    if (sectionType == M2SearchSectionTypePlaylists) {
+        if (indexPath.item < self.filteredPlaylists.count) {
+            M2Playlist *playlist = self.filteredPlaylists[indexPath.item];
+            UIImage *cover = [M2PlaylistStore.sharedStore coverForPlaylist:playlist
+                                                                   library:M2LibraryManager.sharedManager
+                                                                      size:CGSizeMake(220.0, 220.0)];
+            NSString *subtitle = [NSString stringWithFormat:@"%ld tracks", (long)playlist.trackIDs.count];
+            [cell configureWithTitle:playlist.name subtitle:subtitle image:cover];
+        }
+    } else if (sectionType == M2SearchSectionTypeArtists) {
+        if (indexPath.item < self.artistResults.count) {
+            NSDictionary<NSString *, id> *artistEntry = self.artistResults[indexPath.item];
+            NSArray<M2Track *> *matchedTracks = artistEntry[@"tracks"] ?: @[];
+            M2Track *coverTrack = matchedTracks.firstObject;
+            NSString *title = artistEntry[@"title"] ?: @"Artist";
+            NSString *subtitle = [NSString stringWithFormat:@"%ld tracks", (long)matchedTracks.count];
+            [cell configureWithTitle:title subtitle:subtitle image:coverTrack.artwork];
+        }
+    } else {
+        if (indexPath.item < self.filteredTracks.count) {
+            M2Track *track = self.filteredTracks[indexPath.item];
+            NSString *trackTitle = track.title.length > 0 ? track.title :
+                (track.fileName.length > 0 ? track.fileName.stringByDeletingPathExtension : @"Unknown track");
+            NSString *subtitle = track.artist.length > 0 ? track.artist : @"Track";
+            [cell configureWithTitle:trackTitle subtitle:subtitle image:track.artwork];
+        }
+    }
+    return cell;
+}
+
+- (UICollectionReusableView *)collectionView:(UICollectionView *)collectionView
+              viewForSupplementaryElementOfKind:(NSString *)kind
+                                    atIndexPath:(NSIndexPath *)indexPath {
+    if (collectionView != self.searchCollectionView ||
+        ![kind isEqualToString:UICollectionElementKindSectionHeader] ||
+        self.musicOnlyMode) {
+        return [UICollectionReusableView new];
+    }
+
+    M2MusicSearchHeaderView *header = [collectionView dequeueReusableSupplementaryViewOfKind:kind
+                                                                          withReuseIdentifier:M2MusicSearchHeaderReuseID
+                                                                                 forIndexPath:indexPath];
+    M2SearchSectionType sectionType = [self sectionTypeForIndex:indexPath.section];
+    [header configureWithTitle:[self titleForSearchSectionType:sectionType]];
+    return header;
+}
+
+#pragma mark - UICollectionViewDelegate
+
+- (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    if (collectionView != self.searchCollectionView || self.musicOnlyMode) {
+        return;
+    }
+
+    M2SearchSectionType sectionType = [self sectionTypeForIndex:indexPath.section];
+    if (sectionType == M2SearchSectionTypePlaylists) {
+        if (indexPath.item >= self.filteredPlaylists.count) {
+            return;
+        }
+        M2Playlist *playlist = self.filteredPlaylists[indexPath.item];
+        M2PlaylistDetailViewController *detail = [[M2PlaylistDetailViewController alloc] initWithPlaylistID:playlist.playlistID];
+        detail.hidesBottomBarWhenPushed = YES;
+        [self.navigationController pushViewController:detail animated:YES];
+        return;
+    }
+
+    if (sectionType == M2SearchSectionTypeArtists) {
+        if (indexPath.item >= self.artistResults.count) {
+            return;
+        }
+        NSDictionary<NSString *, id> *artistEntry = self.artistResults[indexPath.item];
+        NSString *artistTitle = artistEntry[@"title"] ?: @"";
+        self.searchQuery = artistTitle;
+        self.searchController.searchBar.text = artistTitle;
+        [self applySearchFilterAndReload];
+        return;
+    }
+
+    if (indexPath.item >= self.filteredTracks.count) {
+        return;
+    }
+    M2Track *selectedTrack = self.filteredTracks[indexPath.item];
+    NSInteger startIndex = M2IndexOfTrackByIdentifier(self.tracks, selectedTrack.identifier);
+    if (startIndex == NSNotFound) {
+        return;
+    }
+
+    M2PlaybackManager *playback = M2PlaybackManager.sharedManager;
+    M2Track *currentTrack = playback.currentTrack;
+    BOOL sameTrack = (currentTrack != nil && [currentTrack.identifier isEqualToString:selectedTrack.identifier]);
+    BOOL sameQueue = M2TrackQueuesMatchByIdentifier(playback.currentQueue, self.tracks);
+    if (sameTrack && sameQueue) {
+        [self openPlayer];
+        return;
+    }
+
+    [self openPlayer];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [playback setShuffleEnabled:NO];
+        [playback playTracks:self.tracks startIndex:startIndex];
+    });
+}
+
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     self.searchQuery = searchController.searchBar.text ?: @"";
     [self applySearchFilterAndReload];
+    [self updateSearchControllerAttachment];
 }
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
-    if (scrollView == self.tableView) {
+    if (self.musicOnlyMode && (scrollView == self.tableView || scrollView == self.searchCollectionView)) {
         [self updateSearchControllerAttachment];
     }
 }
@@ -895,6 +1590,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     self.title = nil;
     self.navigationItem.title = nil;
     self.navigationItem.titleView = nil;
+    self.navigationItem.hidesBackButton = YES;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:M2WhiteSectionTitleLabel(@"Playlists")];
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     self.view.backgroundColor = UIColor.systemBackgroundColor;
@@ -938,6 +1634,12 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     [super viewWillAppear:animated];
     self.navigationItem.title = nil;
     self.navigationItem.titleView = nil;
+    self.navigationItem.hidesBackButton = YES;
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
+                                                                                             target:self
+                                                                                             action:@selector(addPlaylistTapped)];
+    self.navigationController.interactivePopGestureRecognizer.enabled = YES;
+    self.navigationController.interactivePopGestureRecognizer.delegate = nil;
     if (self.needsLovelyRefresh) {
         [self reloadPlaylists];
     }
@@ -1241,10 +1943,6 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
                                                            library:M2LibraryManager.sharedManager
                                                               size:CGSizeMake(160.0, 160.0)];
     NSString *subtitle = [NSString stringWithFormat:@"%ld tracks", (long)playlist.trackIDs.count];
-    NSString *lovelyID = [NSUserDefaults.standardUserDefaults stringForKey:M2LovelyPlaylistDefaultsKey];
-    if (lovelyID.length > 0 && [playlist.playlistID isEqualToString:lovelyID]) {
-        subtitle = @"";
-    }
 
     [cell configureWithName:playlist.name subtitle:subtitle artwork:cover];
     return cell;
@@ -1297,6 +1995,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     self.title = @"Favorites";
     self.navigationItem.title = nil;
     self.navigationItem.titleView = nil;
+    self.navigationItem.hidesBackButton = YES;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:M2WhiteSectionTitleLabel(@"Favorites")];
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     self.view.backgroundColor = UIColor.systemBackgroundColor;
@@ -1332,6 +2031,13 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    self.navigationItem.hidesBackButton = YES;
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]
+                                                                               style:UIBarButtonItemStylePlain
+                                                                              target:self
+                                                                              action:@selector(searchButtonTapped)];
+    self.navigationController.interactivePopGestureRecognizer.enabled = YES;
+    self.navigationController.interactivePopGestureRecognizer.delegate = nil;
     [self updateSearchControllerAttachment];
     [self.tableView reloadData];
 }
@@ -1511,8 +2217,8 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
     M2Track *track = self.filteredTracks[indexPath.row];
 
-    UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
-                                                                                title:@"Unfav"
+    UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                                title:@"Unfollow"
                                                                               handler:^(__unused UIContextualAction * _Nonnull action,
                                                                                         __unused UIView * _Nonnull sourceView,
                                                                                         void (^ _Nonnull completionHandler)(BOOL)) {
@@ -1521,6 +2227,7 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         completionHandler(YES);
     }];
     removeAction.image = [UIImage systemImageNamed:@"heart.slash.fill"];
+    removeAction.backgroundColor = [UIColor colorWithWhite:0.40 alpha:1.0];
 
     UIContextualAction *addAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                             title:@"Add"
@@ -1541,31 +2248,16 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
 leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
-    if (indexPath.row >= self.filteredTracks.count) {
-        return [UISwipeActionsConfiguration configurationWithActions:@[]];
-    }
-
-    M2Track *track = self.filteredTracks[indexPath.row];
-    UIContextualAction *favoriteAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                                  title:nil
-                                                                                handler:^(__unused UIContextualAction * _Nonnull action,
-                                                                                          __unused UIView * _Nonnull sourceView,
-                                                                                          void (^ _Nonnull completionHandler)(BOOL)) {
-        [M2FavoritesStore.sharedStore setTrackID:track.identifier favorite:NO];
-        [self reloadFavorites];
-        completionHandler(YES);
-    }];
-    favoriteAction.image = [UIImage systemImageNamed:@"heart.slash.fill"];
-    favoriteAction.backgroundColor = [UIColor colorWithWhite:0.40 alpha:1.0];
-
-    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[favoriteAction]];
-    configuration.performsFirstActionWithFullSwipe = YES;
+    (void)indexPath;
+    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[]];
+    configuration.performsFirstActionWithFullSwipe = NO;
     return configuration;
 }
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     self.searchQuery = searchController.searchBar.text ?: @"";
     [self applySearchFilterAndReload];
+    [self updateSearchControllerAttachment];
 }
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
@@ -2627,11 +3319,23 @@ replacementString:(NSString *)string {
         self.navigationItem.rightBarButtonItem = nil;
         return;
     }
-
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis"]
-                                                                               style:UIBarButtonItemStylePlain
-                                                                              target:self
-                                                                              action:@selector(optionsTapped)];
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:18.0
+                                                                                          weight:UIImageSymbolWeightBold];
+    UIImage *optionsImage = [UIImage systemImageNamed:@"ellipsis" withConfiguration:config];
+    if (optionsImage == nil) {
+        optionsImage = [UIImage imageNamed:@"tab_ellipsis"];
+    }
+    if (optionsImage != nil) {
+        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:optionsImage
+                                                                                   style:UIBarButtonItemStylePlain
+                                                                                  target:self
+                                                                                  action:@selector(optionsTapped)];
+    } else {
+        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"..."
+                                                                                   style:UIBarButtonItemStylePlain
+                                                                                  target:self
+                                                                                  action:@selector(optionsTapped)];
+    }
 }
 
 - (void)reloadData {

@@ -9,6 +9,8 @@
 
 #import <math.h>
 
+#import "M2CollectionsViewController.h"
+#import "M2HomeViewController.h"
 #import "M2MusicModule.h"
 #import "M2Services.h"
 
@@ -112,27 +114,28 @@ static UIColor *M2MiniPlayerBorderColor(void) {
     UINavigationController *musicNav = [[UINavigationController alloc] initWithRootViewController:musicVC];
     musicNav.delegate = self;
     musicNav.navigationBar.prefersLargeTitles = NO;
-    UIImage *musicIcon = [self tabIconNamed:@"tab_note"];
+    UIImage *musicIcon = [self tabSymbolIconNamed:@"magnifyingglass" pointSize:18.0];
     musicNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:nil image:musicIcon selectedImage:musicIcon];
     musicNav.tabBarItem.imageInsets = UIEdgeInsetsMake(2.0, 0.0, -2.0, 0.0);
 
-    M2PlaylistsViewController *playlistsVC = [[M2PlaylistsViewController alloc] init];
-    UINavigationController *playlistsNav = [[UINavigationController alloc] initWithRootViewController:playlistsVC];
-    playlistsNav.delegate = self;
-    playlistsNav.navigationBar.prefersLargeTitles = NO;
-    UIImage *playlistIcon = [self tabIconNamed:@"tab_lib"];
-    playlistsNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:nil image:playlistIcon selectedImage:playlistIcon];
-    playlistsNav.tabBarItem.imageInsets = UIEdgeInsetsMake(2.0, 0.0, -2.0, 0.0);
+    M2HomeViewController *homeVC = [[M2HomeViewController alloc] init];
+    UINavigationController *homeNav = [[UINavigationController alloc] initWithRootViewController:homeVC];
+    homeNav.delegate = self;
+    homeNav.navigationBar.prefersLargeTitles = NO;
+    UIImage *homeIcon = [self tabSymbolIconNamed:@"house.fill" pointSize:19.5];
+    homeNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:nil image:homeIcon selectedImage:homeIcon];
+    homeNav.tabBarItem.imageInsets = UIEdgeInsetsMake(2.0, 0.0, -2.0, 0.0);
 
-    M2FavoritesViewController *favoritesVC = [[M2FavoritesViewController alloc] init];
-    UINavigationController *favoritesNav = [[UINavigationController alloc] initWithRootViewController:favoritesVC];
-    favoritesNav.delegate = self;
-    favoritesNav.navigationBar.prefersLargeTitles = NO;
-    UIImage *favoritesIcon = [self tabSymbolIconNamed:@"heart.fill" pointSize:18.0];
-    favoritesNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:nil image:favoritesIcon selectedImage:favoritesIcon];
-    favoritesNav.tabBarItem.imageInsets = UIEdgeInsetsMake(2.0, 0.0, -2.0, 0.0);
+    M2CollectionsViewController *collectionsVC = [[M2CollectionsViewController alloc] init];
+    UINavigationController *collectionsNav = [[UINavigationController alloc] initWithRootViewController:collectionsVC];
+    collectionsNav.delegate = self;
+    collectionsNav.navigationBar.prefersLargeTitles = NO;
+    UIImage *collectionsIcon = [self tabIconNamed:@"tab_lib"];
+    collectionsNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:nil image:collectionsIcon selectedImage:collectionsIcon];
+    collectionsNav.tabBarItem.imageInsets = UIEdgeInsetsMake(2.0, 0.0, -2.0, 0.0);
 
-    self.viewControllers = @[musicNav, playlistsNav, favoritesNav];
+    self.viewControllers = @[musicNav, homeNav, collectionsNav];
+    self.selectedIndex = 1;
 }
 
 - (void)setupAppearance {
@@ -187,7 +190,23 @@ static UIColor *M2MiniPlayerBorderColor(void) {
     };
     navAppearance.buttonAppearance = barButtonAppearance;
     navAppearance.doneButtonAppearance = barButtonAppearance;
-    navAppearance.backButtonAppearance = barButtonAppearance;
+    UIBarButtonItemAppearance *backButtonAppearance = [[UIBarButtonItemAppearance alloc] init];
+    backButtonAppearance.normal.titleTextAttributes = @{
+        NSForegroundColorAttributeName: UIColor.clearColor
+    };
+    backButtonAppearance.highlighted.titleTextAttributes = @{
+        NSForegroundColorAttributeName: UIColor.clearColor
+    };
+    backButtonAppearance.normal.titlePositionAdjustment = UIOffsetMake(-1000.0, 0.0);
+    backButtonAppearance.highlighted.titlePositionAdjustment = UIOffsetMake(-1000.0, 0.0);
+    navAppearance.backButtonAppearance = backButtonAppearance;
+
+    UIImageSymbolConfiguration *backConfig = [UIImageSymbolConfiguration configurationWithPointSize:20.0
+                                                                                             weight:UIImageSymbolWeightSemibold];
+    UIImage *backImage = [UIImage systemImageNamed:@"chevron.backward" withConfiguration:backConfig];
+    if (backImage != nil) {
+        [navAppearance setBackIndicatorImage:backImage transitionMaskImage:backImage];
+    }
 
     UINavigationBar.appearance.standardAppearance = navAppearance;
     UINavigationBar.appearance.compactAppearance = navAppearance;
@@ -612,7 +631,10 @@ static UIColor *M2MiniPlayerBorderColor(void) {
 - (void)navigationController:(UINavigationController *)navigationController
       willShowViewController:(UIViewController *)viewController
                     animated:(BOOL)animated {
-    (void)viewController;
+    BOOL isRoot = (navigationController.viewControllers.firstObject == viewController);
+    viewController.navigationItem.hidesBackButton = !isRoot;
+    navigationController.interactivePopGestureRecognizer.enabled = YES;
+    navigationController.interactivePopGestureRecognizer.delegate = nil;
     [self updateMiniPlayerPosition];
     if (animated) {
         [self animateMiniPlayerAlongNavigationTransition:navigationController];
