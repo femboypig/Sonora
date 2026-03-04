@@ -27,3 +27,8 @@ Carthage/Build/
 # Editors
 .idea/
 .vscode/
+
+#garbge
+.derivedDataLocal/
+.gradle-user/
+Android/
