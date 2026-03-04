@@ -1,4 +1,4 @@
-# M2
+# Sonora
 
 An offline iOS music player.
 
@@ -9,4 +9,4 @@ An offline iOS music player.
 
 ## Run
 
-Open `M2.xcodeproj` in Xcode and run the `M2` scheme.
+Open `Sonora.xcodeproj` in Xcode and run the `M2` scheme.
