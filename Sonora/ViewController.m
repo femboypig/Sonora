@@ -14,8 +14,53 @@
 #import "SonoraMusicModule.h"
 #import "SonoraServices.h"
 
-static UIColor *SonoraAccentYellowColor(void) {
+static UIColor *SonoraRootDefaultAccentColor(void) {
     return [UIColor colorWithRed:1.0 green:0.83 blue:0.08 alpha:1.0];
+}
+
+static UIColor *SonoraRootLegacyAccentColorForIndex(NSInteger raw) {
+    switch (raw) {
+        case 1:
+            return [UIColor colorWithRed:0.31 green:0.64 blue:1.0 alpha:1.0];
+        case 2:
+            return [UIColor colorWithRed:0.22 green:0.83 blue:0.62 alpha:1.0];
+        case 3:
+            return [UIColor colorWithRed:1.0 green:0.48 blue:0.40 alpha:1.0];
+        case 0:
+        default:
+            return SonoraRootDefaultAccentColor();
+    }
+}
+
+static UIColor *SonoraRootColorFromHexString(NSString *hexString) {
+    if (hexString.length == 0) {
+        return nil;
+    }
+    NSString *normalized = [[hexString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] uppercaseString];
+    if ([normalized hasPrefix:@"#"]) {
+        normalized = [normalized substringFromIndex:1];
+    }
+    if (normalized.length != 6) {
+        return nil;
+    }
+
+    unsigned int rgb = 0;
+    if (![[NSScanner scannerWithString:normalized] scanHexInt:&rgb]) {
+        return nil;
+    }
+    CGFloat red = ((rgb >> 16) & 0xFF) / 255.0;
+    CGFloat green = ((rgb >> 8) & 0xFF) / 255.0;
+    CGFloat blue = (rgb & 0xFF) / 255.0;
+    return [UIColor colorWithRed:red green:green blue:blue alpha:1.0];
+}
+
+static UIColor *SonoraAccentYellowColor(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    UIColor *fromHex = SonoraRootColorFromHexString([defaults stringForKey:@"sonora.settings.accentHex"]);
+    if (fromHex != nil) {
+        return fromHex;
+    }
+    return SonoraRootLegacyAccentColorForIndex([defaults integerForKey:@"sonora.settings.accentColor"]);
 }
 
 static UIColor *SonoraTabActiveIconColor(void) {
@@ -94,6 +139,10 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(handlePlaybackStateChanged)
                                                name:SonoraPlaybackStateDidChangeNotification
+                                             object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(handlePlayerSettingsChanged)
+                                               name:SonoraPlayerSettingsDidChangeNotification
                                              object:nil];
 
     [self updateMiniPlayer];
@@ -215,6 +264,10 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     }
     UINavigationBar.appearance.tintColor = UIColor.labelColor;
 
+    self.view.tintColor = SonoraAccentYellowColor();
+}
+
+- (void)handlePlayerSettingsChanged {
     self.view.tintColor = SonoraAccentYellowColor();
 }
 
@@ -384,39 +437,35 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     if (coordinator != nil) {
         UIViewController *toViewController = [coordinator viewControllerForKey:UITransitionContextToViewControllerKey];
         if (toViewController != nil) {
-            return !toViewController.hidesBottomBarWhenPushed;
+            return [self isMiniPlayerAllowedForViewController:toViewController];
         }
     }
 
     UIViewController *active = navigation.visibleViewController ?: navigation.topViewController;
-    if (active == nil) {
-        return YES;
-    }
-    return !active.hidesBottomBarWhenPushed;
+    return [self isMiniPlayerAllowedForViewController:active];
 }
 
 - (BOOL)isMiniPlayerAllowedForViewController:(UIViewController *)viewController {
     if (viewController == nil) {
         return YES;
     }
-    return !viewController.hidesBottomBarWhenPushed;
+    if (viewController.hidesBottomBarWhenPushed) {
+        return NO;
+    }
+    NSString *className = NSStringFromClass(viewController.class);
+    if ([className isEqualToString:@"SonoraPlayerViewController"]) {
+        return NO;
+    }
+    if ([className isEqualToString:@"SonoraSettingsViewController"]) {
+        return NO;
+    }
+    return YES;
 }
 
 - (BOOL)shouldShowMiniPlayer {
     if (SonoraPlaybackManager.sharedManager.currentTrack == nil) {
         return NO;
     }
-
-    if (self.tabBar.superview == nil) {
-        return NO;
-    }
-
-    CGRect tabBarFrameInView = [self.view convertRect:self.tabBar.frame fromView:self.tabBar.superview];
-    CGFloat tabBarTop = CGRectGetMinY(tabBarFrameInView);
-    if (!isfinite(tabBarTop) || tabBarTop >= CGRectGetHeight(self.view.bounds)) {
-        return NO;
-    }
-
     return [self isMiniPlayerAllowedForCurrentController];
 }
 
@@ -468,17 +517,20 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
 }
 
 - (void)updateMiniPlayerPosition {
-    if (self.miniPlayerBottomConstraint == nil || self.tabBar.superview == nil) {
+    if (self.miniPlayerBottomConstraint == nil) {
         return;
     }
 
-    CGRect tabBarFrameInView = [self.view convertRect:self.tabBar.frame fromView:self.tabBar.superview];
-    CGFloat tabBarTop = CGRectGetMinY(tabBarFrameInView);
-    if (!isfinite(tabBarTop) || tabBarTop <= 0.0) {
-        tabBarTop = CGRectGetHeight(self.view.bounds) - CGRectGetHeight(self.tabBar.bounds);
+    CGFloat distanceFromBottom = MAX(self.view.safeAreaInsets.bottom, 0.0);
+    if (self.tabBar.superview != nil) {
+        CGRect tabBarFrameInView = [self.view convertRect:self.tabBar.frame fromView:self.tabBar.superview];
+        CGFloat tabBarTop = CGRectGetMinY(tabBarFrameInView);
+        if (isfinite(tabBarTop) && tabBarTop < (CGRectGetHeight(self.view.bounds) - 0.5)) {
+            distanceFromBottom = MAX(distanceFromBottom,
+                                     MAX(0.0, CGRectGetHeight(self.view.bounds) - tabBarTop));
+        }
     }
 
-    CGFloat distanceFromBottom = MAX(0.0, CGRectGetHeight(self.view.bounds) - tabBarTop);
     self.miniPlayerBottomConstraint.constant = -(distanceFromBottom + 6.0);
 }
 

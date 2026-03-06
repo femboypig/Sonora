@@ -246,8 +246,13 @@ static NSData *SonoraWidgetThumbnailData(UIImage *image, CGSize targetSize) {
         return;
     }
 
+    NSArray *existingLovely = [sharedDefaults objectForKey:SonoraWidgetLovelyTracksDefaultsKey];
+    NSArray *existingRandom = [sharedDefaults objectForKey:SonoraWidgetRandomTracksDefaultsKey];
+    BOOL hasExistingPayload = ([existingLovely isKindOfClass:NSArray.class] && existingLovely.count > 0) ||
+    ([existingRandom isKindOfClass:NSArray.class] && existingRandom.count > 0);
+
     NSDate *lastUpdatedAt = [sharedDefaults objectForKey:SonoraWidgetUpdatedAtDefaultsKey];
-    if ([lastUpdatedAt isKindOfClass:NSDate.class]) {
+    if (hasExistingPayload && [lastUpdatedAt isKindOfClass:NSDate.class]) {
         NSTimeInterval age = fabs(lastUpdatedAt.timeIntervalSinceNow);
         if (age < SonoraWidgetRefreshThrottleInterval) {
             return;
@@ -266,6 +271,7 @@ static NSData *SonoraWidgetThumbnailData(UIImage *image, CGSize targetSize) {
     [sharedDefaults setObject:lovelyPayload forKey:SonoraWidgetLovelyTracksDefaultsKey];
     [sharedDefaults setObject:randomPayload forKey:SonoraWidgetRandomTracksDefaultsKey];
     [sharedDefaults setObject:NSDate.date forKey:SonoraWidgetUpdatedAtDefaultsKey];
+    [sharedDefaults synchronize];
     [self reloadWidgetTimelinesIfAvailable];
 }
 

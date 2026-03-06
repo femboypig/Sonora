@@ -12,9 +12,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXTERN NSString * const SonoraPlaybackStateDidChangeNotification;
 FOUNDATION_EXTERN NSString * const SonoraPlaybackProgressDidChangeNotification;
+FOUNDATION_EXTERN NSString * const SonoraPlaybackMeterDidChangeNotification;
 FOUNDATION_EXTERN NSString * const SonoraPlaylistsDidChangeNotification;
 FOUNDATION_EXTERN NSString * const SonoraFavoritesDidChangeNotification;
 FOUNDATION_EXTERN NSString * const SonoraSleepTimerDidChangeNotification;
+FOUNDATION_EXTERN NSString * const SonoraPlayerSettingsDidChangeNotification;
 
 typedef NS_ENUM(NSInteger, SonoraRepeatMode) {
     SonoraRepeatModeNone = 0,

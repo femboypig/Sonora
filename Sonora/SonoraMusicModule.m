@@ -5,15 +5,13 @@
 
 #import "SonoraMusicModule.h"
 
+#import <limits.h>
 #import <math.h>
 #import <PhotosUI/PhotosUI.h>
+#import <QuartzCore/QuartzCore.h>
 
 #import "SonoraCells.h"
 #import "SonoraServices.h"
-
-static UIColor *SonoraAccentYellowColor(void) {
-    return [UIColor colorWithRed:1.0 green:0.83 blue:0.08 alpha:1.0];
-}
 
 static UIColor *SonoraLovelyAccentRedColor(void) {
     return [UIColor colorWithRed:0.90 green:0.12 blue:0.15 alpha:1.0];
@@ -21,6 +19,80 @@ static UIColor *SonoraLovelyAccentRedColor(void) {
 
 static NSString * const SonoraLovelyPlaylistDefaultsKey = @"sonora_lovely_playlist_id_v1";
 static NSString * const SonoraLovelyPlaylistCoverMarkerKey = @"sonora_lovely_playlist_cover_marker_v2";
+static NSString * const SonoraSettingsFontKey = @"sonora.settings.font";
+static NSString * const SonoraSettingsAccentHexKey = @"sonora.settings.accentHex";
+static NSString * const SonoraSettingsLegacyAccentColorKey = @"sonora.settings.accentColor";
+static NSString * const SonoraSettingsArtworkStyleKey = @"sonora.settings.artworkStyle";
+static NSString * const SonoraSettingsArtworkEqualizerKey = @"sonora.settings.showArtworkEqualizer";
+static NSString * const SonoraSettingsMaxStorageMBKey = @"sonora.settings.maxStorageMB";
+
+typedef NS_ENUM(NSInteger, SonoraPlayerFontStyle) {
+    SonoraPlayerFontStyleSystem = 0,
+    SonoraPlayerFontStyleSerif = 1,
+};
+
+typedef NS_ENUM(NSInteger, SonoraPlayerArtworkStyle) {
+    SonoraPlayerArtworkStyleSquare = 0,
+    SonoraPlayerArtworkStyleRounded = 1,
+};
+
+static UIColor *SonoraDefaultAccentColor(void) {
+    return [UIColor colorWithRed:1.0 green:0.83 blue:0.08 alpha:1.0];
+}
+
+static UIColor *SonoraLegacyAccentColorForIndex(NSInteger raw) {
+    switch (raw) {
+        case 1:
+            return [UIColor colorWithRed:0.31 green:0.64 blue:1.0 alpha:1.0];
+        case 2:
+            return [UIColor colorWithRed:0.22 green:0.83 blue:0.62 alpha:1.0];
+        case 3:
+            return [UIColor colorWithRed:1.0 green:0.48 blue:0.40 alpha:1.0];
+        case 0:
+        default:
+            return SonoraDefaultAccentColor();
+    }
+}
+
+static UIColor *SonoraColorFromHexString(NSString *hexString) {
+    if (hexString.length == 0) {
+        return nil;
+    }
+    NSString *normalized = [[hexString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] uppercaseString];
+    if ([normalized hasPrefix:@"#"]) {
+        normalized = [normalized substringFromIndex:1];
+    }
+    if (normalized.length != 6) {
+        return nil;
+    }
+
+    unsigned int rgb = 0;
+    if (![[NSScanner scannerWithString:normalized] scanHexInt:&rgb]) {
+        return nil;
+    }
+
+    CGFloat red = ((rgb >> 16) & 0xFF) / 255.0;
+    CGFloat green = ((rgb >> 8) & 0xFF) / 255.0;
+    CGFloat blue = (rgb & 0xFF) / 255.0;
+    return [UIColor colorWithRed:red green:green blue:blue alpha:1.0];
+}
+
+static UIColor *SonoraAccentYellowColor(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    UIColor *fromHex = SonoraColorFromHexString([defaults stringForKey:SonoraSettingsAccentHexKey]);
+    if (fromHex != nil) {
+        return fromHex;
+    }
+    return SonoraLegacyAccentColorForIndex([defaults integerForKey:SonoraSettingsLegacyAccentColorKey]);
+}
+
+static SonoraPlayerFontStyle SonoraPlayerFontStyleFromDefaults(void) {
+    NSInteger raw = [NSUserDefaults.standardUserDefaults integerForKey:SonoraSettingsFontKey];
+    if (raw < SonoraPlayerFontStyleSystem || raw > SonoraPlayerFontStyleSerif) {
+        return SonoraPlayerFontStyleSystem;
+    }
+    return (SonoraPlayerFontStyle)raw;
+}
 
 static UIColor *SonoraPlayerBackgroundColor(void) {
     return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
@@ -64,6 +136,71 @@ static UIFont *SonoraHeadlineFont(CGFloat size) {
         return font;
     }
     return [UIFont boldSystemFontOfSize:size];
+}
+
+static UIFont *SonoraNewYorkFont(CGFloat size, UIFontWeight weight) {
+    NSArray<NSString *> *candidates = @[@"NewYork-Regular"];
+    if (weight >= UIFontWeightBold) {
+        candidates = @[@"NewYork-Bold", @"NewYork-Semibold", @"NewYork-Medium", @"NewYork-Regular"];
+    } else if (weight >= UIFontWeightSemibold) {
+        candidates = @[@"NewYork-Semibold", @"NewYork-Medium", @"NewYork-Regular"];
+    } else if (weight >= UIFontWeightMedium) {
+        candidates = @[@"NewYork-Medium", @"NewYork-Regular"];
+    }
+
+    for (NSString *name in candidates) {
+        UIFont *font = [UIFont fontWithName:name size:size];
+        if (font != nil) {
+            return font;
+        }
+    }
+
+    UIFontDescriptor *baseDescriptor = [UIFont systemFontOfSize:size weight:weight].fontDescriptor;
+    UIFontDescriptor *serifDescriptor = [baseDescriptor fontDescriptorWithDesign:UIFontDescriptorSystemDesignSerif];
+    if (serifDescriptor != nil) {
+        UIFont *font = [UIFont fontWithDescriptor:serifDescriptor size:size];
+        if (font != nil) {
+            return font;
+        }
+    }
+    return [UIFont systemFontOfSize:size weight:weight];
+}
+
+static UIFont *SonoraPlayerFontForStyle(SonoraPlayerFontStyle style, CGFloat size, UIFontWeight weight) {
+    switch (style) {
+        case SonoraPlayerFontStyleSerif: {
+            return SonoraNewYorkFont(size, weight);
+        }
+        case SonoraPlayerFontStyleSystem:
+        default:
+            return [UIFont systemFontOfSize:size weight:weight];
+    }
+}
+
+static SonoraPlayerArtworkStyle SonoraPlayerArtworkStyleFromDefaults(void) {
+    NSInteger raw = [NSUserDefaults.standardUserDefaults integerForKey:SonoraSettingsArtworkStyleKey];
+    if (raw < SonoraPlayerArtworkStyleSquare || raw > SonoraPlayerArtworkStyleRounded) {
+        return SonoraPlayerArtworkStyleRounded;
+    }
+    return (SonoraPlayerArtworkStyle)raw;
+}
+
+static BOOL SonoraArtworkEqualizerEnabledFromDefaults(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults objectForKey:SonoraSettingsArtworkEqualizerKey] == nil) {
+        return YES;
+    }
+    return [defaults boolForKey:SonoraSettingsArtworkEqualizerKey];
+}
+
+static CGFloat SonoraArtworkCornerRadiusForStyle(SonoraPlayerArtworkStyle style, CGFloat width) {
+    switch (style) {
+        case SonoraPlayerArtworkStyleSquare:
+            return 0.0;
+        case SonoraPlayerArtworkStyleRounded:
+        default:
+            return MIN(26.0, width * 0.08);
+    }
 }
 
 static UIImage *SonoraLovelySongsCoverImage(CGSize size) {
@@ -1139,7 +1276,80 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
 }
 
 - (void)addMusicTapped {
+    if ([self isLibraryAtOrAboveStorageLimit]) {
+        [self presentStorageLimitReachedAlert];
+        return;
+    }
     [self reloadTracks];
+}
+
+- (unsigned long long)currentLibraryUsageBytes {
+    NSURL *musicDirectoryURL = [SonoraLibraryManager.sharedManager musicDirectoryURL];
+    if (musicDirectoryURL == nil) {
+        return 0ULL;
+    }
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    NSDirectoryEnumerator<NSURL *> *enumerator =
+    [fileManager enumeratorAtURL:musicDirectoryURL
+      includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLFileSizeKey]
+                         options:NSDirectoryEnumerationSkipsHiddenFiles
+                    errorHandler:nil];
+    unsigned long long totalBytes = 0ULL;
+    for (NSURL *fileURL in enumerator) {
+        NSNumber *isRegularFile = nil;
+        [fileURL getResourceValue:&isRegularFile forKey:NSURLIsRegularFileKey error:nil];
+        if (!isRegularFile.boolValue) {
+            continue;
+        }
+        NSNumber *fileSize = nil;
+        [fileURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        totalBytes += fileSize.unsignedLongLongValue;
+    }
+    return totalBytes;
+}
+
+- (unsigned long long)maxLibraryStorageBytes {
+    NSInteger raw = [NSUserDefaults.standardUserDefaults integerForKey:SonoraSettingsMaxStorageMBKey];
+    NSInteger valueMB = raw;
+    if (valueMB <= 0) {
+        return ULLONG_MAX;
+    }
+    NSArray<NSNumber *> *allowed = @[@512, @1024, @2048, @3072, @4096, @6144, @8192];
+    NSInteger nearest = allowed.firstObject.integerValue;
+    NSInteger delta = labs(valueMB - nearest);
+    for (NSNumber *candidate in allowed) {
+        NSInteger current = candidate.integerValue;
+        NSInteger currentDelta = labs(valueMB - current);
+        if (currentDelta < delta) {
+            delta = currentDelta;
+            nearest = current;
+        }
+    }
+    return ((unsigned long long)nearest) * 1024ULL * 1024ULL;
+}
+
+- (BOOL)isLibraryAtOrAboveStorageLimit {
+    unsigned long long maxBytes = [self maxLibraryStorageBytes];
+    if (maxBytes == ULLONG_MAX) {
+        return NO;
+    }
+    return [self currentLibraryUsageBytes] >= maxBytes;
+}
+
+- (void)presentStorageLimitReachedAlert {
+    unsigned long long usedBytes = [self currentLibraryUsageBytes];
+    unsigned long long maxBytes = [self maxLibraryStorageBytes];
+    if (maxBytes == ULLONG_MAX) {
+        return;
+    }
+    NSString *usedText = [NSByteCountFormatter stringFromByteCount:(long long)usedBytes
+                                                        countStyle:NSByteCountFormatterCountStyleFile];
+    NSString *maxText = [NSByteCountFormatter stringFromByteCount:(long long)maxBytes
+                                                       countStyle:NSByteCountFormatterCountStyleFile];
+    NSString *message = [NSString stringWithFormat:@"Library size %@ reached/over max %@.\nAdding music is blocked until you free space or increase Max player space in Settings.",
+                         usedText,
+                         maxText];
+    SonoraPresentAlert(self, @"Storage limit reached", message);
 }
 
 - (void)refreshNavigationItemsForMusicSelectionState {
@@ -2109,6 +2319,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     }
     SonoraPlaylist *playlist = self.filteredPlaylists[indexPath.row];
     SonoraPlaylistDetailViewController *detail = [[SonoraPlaylistDetailViewController alloc] initWithPlaylistID:playlist.playlistID];
+    detail.hidesBottomBarWhenPushed = YES;
     [self.navigationController pushViewController:detail animated:YES];
 }
 
@@ -4228,6 +4439,104 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
 #pragma mark - Player
 
+@interface SonoraArtworkEqualizerBadgeView : UIView
+
+- (void)setBarColor:(UIColor *)color;
+- (void)setPlaying:(BOOL)playing;
+- (void)setLevel:(CGFloat)level;
+
+@end
+
+@interface SonoraArtworkEqualizerBadgeView ()
+
+@property (nonatomic, copy) NSArray<UIView *> *barViews;
+@property (nonatomic, copy) NSArray<NSLayoutConstraint *> *barHeightConstraints;
+@property (nonatomic, assign) BOOL playing;
+
+@end
+
+@implementation SonoraArtworkEqualizerBadgeView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.userInteractionEnabled = NO;
+        self.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.58];
+        self.layer.cornerRadius = 8.0;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.20].CGColor;
+        self.layer.masksToBounds = YES;
+
+        NSArray<NSNumber *> *heights = @[@5.0, @8.0, @9.0, @6.0];
+        NSMutableArray<UIView *> *bars = [NSMutableArray arrayWithCapacity:heights.count];
+        NSMutableArray<NSLayoutConstraint *> *heightConstraints = [NSMutableArray arrayWithCapacity:heights.count];
+        UIView *previousBar = nil;
+        for (NSNumber *height in heights) {
+            UIView *bar = [[UIView alloc] init];
+            bar.translatesAutoresizingMaskIntoConstraints = NO;
+            bar.backgroundColor = UIColor.whiteColor;
+            bar.layer.cornerRadius = 1.3;
+            bar.layer.masksToBounds = YES;
+            [self addSubview:bar];
+            [bars addObject:bar];
+
+            NSLayoutConstraint *heightConstraint = [bar.heightAnchor constraintEqualToConstant:height.doubleValue];
+            [NSLayoutConstraint activateConstraints:@[
+                [bar.widthAnchor constraintEqualToConstant:2.4],
+                heightConstraint,
+                [bar.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-4.0]
+            ]];
+            [heightConstraints addObject:heightConstraint];
+            if (previousBar == nil) {
+                [bar.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:6.0].active = YES;
+            } else {
+                [bar.leadingAnchor constraintEqualToAnchor:previousBar.trailingAnchor constant:2.5].active = YES;
+            }
+            previousBar = bar;
+        }
+        [previousBar.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-6.0].active = YES;
+        self.barViews = [bars copy];
+        self.barHeightConstraints = [heightConstraints copy];
+    }
+    return self;
+}
+
+- (void)setBarColor:(UIColor *)color {
+    UIColor *resolved = color ?: UIColor.whiteColor;
+    for (UIView *bar in self.barViews) {
+        bar.backgroundColor = resolved;
+    }
+}
+
+- (void)setPlaying:(BOOL)playing {
+    _playing = playing;
+    self.alpha = playing ? 1.0 : 0.90;
+}
+
+- (void)setLevel:(CGFloat)level {
+    CGFloat clamped = MIN(MAX(level, 0.0), 1.0);
+    NSArray<NSNumber *> *weights = @[@0.62, @0.92, @1.0, @0.76];
+
+    for (NSUInteger index = 0; index < self.barHeightConstraints.count; index += 1) {
+        CGFloat weight = [weights[index] doubleValue];
+        CGFloat base = self.playing ? 4.0 : 3.2;
+        CGFloat dynamic = clamped * (self.playing ? 14.0 : 5.0) * weight;
+        self.barHeightConstraints[index].constant = base + dynamic;
+    }
+
+    if (self.window != nil) {
+        [UIView animateWithDuration:0.16
+                              delay:0.0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            [self layoutIfNeeded];
+        } completion:nil];
+    }
+}
+
+@end
+
 @interface SonoraPlayerViewController ()
 
 @property (nonatomic, strong) UIImageView *artworkView;
@@ -4244,6 +4553,9 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 @property (nonatomic, strong) UIButton *nextButton;
 @property (nonatomic, strong) UIButton *favoriteButton;
 @property (nonatomic, strong) UIButton *sleepTimerButton;
+@property (nonatomic, strong) SonoraArtworkEqualizerBadgeView *equalizerBadgeView;
+@property (nonatomic, strong) NSLayoutConstraint *artworkLeadingConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *artworkTrailingConstraint;
 @property (nonatomic, assign) BOOL scrubbing;
 
 @end
@@ -4288,6 +4600,10 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
                                            selector:@selector(handleProgressChanged)
                                                name:SonoraPlaybackProgressDidChangeNotification
                                              object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(handlePlaybackMeterChanged:)
+                                               name:SonoraPlaybackMeterDidChangeNotification
+                                             object:nil];
 
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(updateFavoriteButton)
@@ -4297,6 +4613,11 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(updateSleepTimerButton)
                                                name:SonoraSleepTimerDidChangeNotification
+                                             object:nil];
+
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(handlePlayerSettingsChanged:)
+                                               name:SonoraPlayerSettingsDidChangeNotification
                                              object:nil];
 
     [self refreshUI];
@@ -4316,6 +4637,11 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     self.navigationController.interactivePopGestureRecognizer.enabled = YES;
 }
 
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self updateArtworkCornerRadius];
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [self.navigationController setNavigationBarHidden:NO animated:animated];
@@ -4331,6 +4657,11 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     artworkView.layer.cornerRadius = 0.0;
     artworkView.layer.masksToBounds = YES;
     self.artworkView = artworkView;
+
+    SonoraArtworkEqualizerBadgeView *equalizerBadge = [[SonoraArtworkEqualizerBadgeView alloc] init];
+    equalizerBadge.hidden = YES;
+    self.equalizerBadgeView = equalizerBadge;
+    [artworkView addSubview:equalizerBadge];
 
     UILabel *artistLabel = [[UILabel alloc] init];
     artistLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4468,6 +4799,8 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
     NSLayoutConstraint *artworkSquare = [artworkView.heightAnchor constraintEqualToAnchor:artworkView.widthAnchor];
     artworkSquare.priority = UILayoutPriorityDefaultHigh;
+    self.artworkLeadingConstraint = [artworkView.leadingAnchor constraintEqualToAnchor:content.leadingAnchor];
+    self.artworkTrailingConstraint = [artworkView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -4477,10 +4810,14 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         [content.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
 
         [artworkView.topAnchor constraintEqualToAnchor:safe.topAnchor],
-        [artworkView.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [artworkView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        self.artworkLeadingConstraint,
+        self.artworkTrailingConstraint,
         artworkSquare,
         [artworkView.heightAnchor constraintLessThanOrEqualToAnchor:content.heightAnchor multiplier:0.56],
+        [equalizerBadge.bottomAnchor constraintEqualToAnchor:artworkView.bottomAnchor constant:-10.0],
+        [equalizerBadge.trailingAnchor constraintEqualToAnchor:artworkView.trailingAnchor constant:-10.0],
+        [equalizerBadge.widthAnchor constraintEqualToConstant:30.0],
+        [equalizerBadge.heightAnchor constraintEqualToConstant:24.0],
 
         [slider.topAnchor constraintEqualToAnchor:artworkView.bottomAnchor constant:16.0],
         [slider.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16.0],
@@ -4528,13 +4865,18 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 - (void)applyPlayerTheme {
     UIColor *primary = SonoraPlayerPrimaryColor();
     UIColor *secondary = SonoraPlayerSecondaryColor();
+    SonoraPlayerFontStyle fontStyle = SonoraPlayerFontStyleFromDefaults();
 
     self.view.backgroundColor = SonoraPlayerBackgroundColor();
+    [self updateArtworkCornerRadius];
     self.titleLabel.textColor = primary;
     self.subtitleLabel.textColor = secondary;
     self.elapsedLabel.textColor = secondary;
     self.durationLabel.textColor = secondary;
     self.nextPreviewLabel.textColor = secondary;
+    self.titleLabel.font = SonoraPlayerFontForStyle(fontStyle, 24.0, UIFontWeightSemibold);
+    self.subtitleLabel.font = SonoraPlayerFontForStyle(fontStyle, 24.0, UIFontWeightSemibold);
+    self.nextPreviewLabel.font = SonoraPlayerFontForStyle(fontStyle, 18.0, UIFontWeightSemibold);
 
     self.progressSlider.minimumTrackTintColor = primary;
     self.progressSlider.maximumTrackTintColor = SonoraPlayerTimelineMaxColor();
@@ -4544,11 +4886,58 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
     BOOL controlsEnabled = self.playPauseButton.enabled;
     UIColor *controlColor = controlsEnabled ? primary : [secondary colorWithAlphaComponent:0.65];
+    NSArray<UIButton *> *buttons = @[
+        self.repeatButton,
+        self.shuffleButton,
+        self.previousButton,
+        self.playPauseButton,
+        self.nextButton,
+        self.favoriteButton,
+        self.sleepTimerButton
+    ];
+    for (UIButton *button in buttons) {
+        CGFloat height = CGRectGetHeight(button.bounds);
+        if (height < 1.0) {
+            [button layoutIfNeeded];
+            height = CGRectGetHeight(button.bounds);
+        }
+        if (height < 1.0) {
+            height = 42.0;
+        }
+        button.backgroundColor = UIColor.clearColor;
+        button.layer.cornerRadius = 0.0;
+        button.layer.masksToBounds = YES;
+    }
+
+    [self.equalizerBadgeView setBarColor:[UIColor colorWithWhite:1.0 alpha:0.96]];
+    self.equalizerBadgeView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.58];
+
+    self.repeatButton.tintColor = [primary colorWithAlphaComponent:0.92];
+    self.shuffleButton.tintColor = [primary colorWithAlphaComponent:0.92];
     self.previousButton.tintColor = controlColor;
     self.playPauseButton.tintColor = controlColor;
     self.nextButton.tintColor = controlColor;
     [self updateFavoriteButton];
     [self updateSleepTimerButton];
+    [self updateEqualizerBadge];
+}
+
+- (void)updateArtworkCornerRadius {
+    SonoraPlayerArtworkStyle artworkStyle = SonoraPlayerArtworkStyleFromDefaults();
+    CGFloat horizontalInset = (artworkStyle == SonoraPlayerArtworkStyleRounded) ? 12.0 : 0.0;
+    self.artworkLeadingConstraint.constant = horizontalInset;
+    self.artworkTrailingConstraint.constant = -horizontalInset;
+    self.artworkView.layer.cornerRadius = SonoraArtworkCornerRadiusForStyle(artworkStyle, CGRectGetWidth(self.artworkView.bounds));
+    self.artworkView.layer.masksToBounds = YES;
+    if (@available(iOS 13.0, *)) {
+        self.artworkView.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+}
+
+- (void)handlePlayerSettingsChanged:(NSNotification *)notification {
+    (void)notification;
+    [self applyPlayerTheme];
+    [self updateEqualizerBadge];
 }
 
 - (void)previousTapped {
@@ -4620,6 +5009,35 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     self.sleepTimerButton.accessibilityLabel = isActive
     ? [NSString stringWithFormat:@"Sleep timer active, %@ remaining", SonoraSleepTimerRemainingString(SonoraSleepTimerManager.sharedManager.remainingTime)]
     : @"Sleep timer";
+}
+
+- (void)updateEqualizerBadge {
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    BOOL enabled = SonoraArtworkEqualizerEnabledFromDefaults();
+    BOOL hasTrack = (playback.currentTrack != nil);
+    BOOL visible = enabled && hasTrack;
+    self.equalizerBadgeView.hidden = !visible;
+    if (!visible) {
+        [self.equalizerBadgeView setPlaying:NO];
+        [self.equalizerBadgeView setLevel:0.0];
+        return;
+    }
+
+    BOOL isPlaying = playback.isPlaying;
+    [self.equalizerBadgeView setPlaying:isPlaying];
+    [self.equalizerBadgeView setLevel:isPlaying ? 0.18 : 0.06];
+}
+
+- (void)handlePlaybackMeterChanged:(NSNotification *)notification {
+    if (self.equalizerBadgeView.hidden) {
+        return;
+    }
+
+    NSNumber *levelNumber = notification.userInfo[@"level"];
+    CGFloat level = [levelNumber isKindOfClass:NSNumber.class] ? (CGFloat)levelNumber.doubleValue : 0.0;
+    BOOL isPlaying = SonoraPlaybackManager.sharedManager.isPlaying;
+    [self.equalizerBadgeView setPlaying:isPlaying];
+    [self.equalizerBadgeView setLevel:isPlaying ? level : 0.06];
 }
 
 - (void)sliderTouchDown {

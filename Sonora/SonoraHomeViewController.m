@@ -5,6 +5,7 @@
 
 #import "SonoraHomeViewController.h"
 
+#import <limits.h>
 #import <math.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -45,8 +46,57 @@ static UIFont *SonoraNotoSerifBoldFont(CGFloat size) {
     return [UIFont systemFontOfSize:size weight:UIFontWeightBold];
 }
 
-static UIColor *SonoraHomeAccentYellowColor(void) {
+static NSString * const SonoraSettingsAccentHexKey = @"sonora.settings.accentHex";
+static NSString * const SonoraSettingsLegacyAccentColorKey = @"sonora.settings.accentColor";
+
+static UIColor *SonoraHomeDefaultAccentColor(void) {
     return [UIColor colorWithRed:1.0 green:0.83 blue:0.08 alpha:1.0];
+}
+
+static UIColor *SonoraHomeLegacyAccentColorForIndex(NSInteger raw) {
+    switch (raw) {
+        case 1:
+            return [UIColor colorWithRed:0.31 green:0.64 blue:1.0 alpha:1.0];
+        case 2:
+            return [UIColor colorWithRed:0.22 green:0.83 blue:0.62 alpha:1.0];
+        case 3:
+            return [UIColor colorWithRed:1.0 green:0.48 blue:0.40 alpha:1.0];
+        case 0:
+        default:
+            return SonoraHomeDefaultAccentColor();
+    }
+}
+
+static UIColor *SonoraHomeColorFromHexString(NSString *hexString) {
+    if (hexString.length == 0) {
+        return nil;
+    }
+    NSString *normalized = [[hexString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] uppercaseString];
+    if ([normalized hasPrefix:@"#"]) {
+        normalized = [normalized substringFromIndex:1];
+    }
+    if (normalized.length != 6) {
+        return nil;
+    }
+
+    unsigned int rgb = 0;
+    if (![[NSScanner scannerWithString:normalized] scanHexInt:&rgb]) {
+        return nil;
+    }
+
+    CGFloat red = ((rgb >> 16) & 0xFF) / 255.0;
+    CGFloat green = ((rgb >> 8) & 0xFF) / 255.0;
+    CGFloat blue = (rgb & 0xFF) / 255.0;
+    return [UIColor colorWithRed:red green:green blue:blue alpha:1.0];
+}
+
+static UIColor *SonoraHomeAccentYellowColor(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    UIColor *fromHex = SonoraHomeColorFromHexString([defaults stringForKey:SonoraSettingsAccentHexKey]);
+    if (fromHex != nil) {
+        return fromHex;
+    }
+    return SonoraHomeLegacyAccentColorForIndex([defaults integerForKey:SonoraSettingsLegacyAccentColorKey]);
 }
 
 static NSDate *SonoraTrackModifiedDate(SonoraTrack *track) {
@@ -1592,6 +1642,778 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
 
 @end
 
+static NSString * const SonoraSettingsFontKey = @"sonora.settings.font";
+static NSString * const SonoraSettingsArtworkStyleKey = @"sonora.settings.artworkStyle";
+static NSString * const SonoraSettingsArtworkEqualizerKey = @"sonora.settings.showArtworkEqualizer";
+static NSString * const SonoraSettingsTrackGapKey = @"sonora.settings.trackGapSeconds";
+static NSString * const SonoraSettingsMaxStorageMBKey = @"sonora.settings.maxStorageMB";
+static NSString * const SonoraSettingsPreservePlayerModesKey = @"sonora.settings.preservePlayerModes";
+static NSString * const SonoraSettingsGitHubURLString = @"https://github.com/femboypig/Sonora";
+static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
+
+@interface SonoraSettingsViewController : UIViewController <UIColorPickerViewControllerDelegate>
+
+@property (nonatomic, strong) UISegmentedControl *fontControl;
+@property (nonatomic, strong) UISegmentedControl *artworkStyleControl;
+@property (nonatomic, strong) UISwitch *artworkEqualizerSwitch;
+@property (nonatomic, strong) UISwitch *preservePlayerModesSwitch;
+@property (nonatomic, strong) UILabel *accentColorValueLabel;
+@property (nonatomic, strong) UILabel *trackGapValueLabel;
+@property (nonatomic, strong) UILabel *usedStorageValueLabel;
+@property (nonatomic, strong) UILabel *maxStorageValueLabel;
+
+@end
+
+@implementation SonoraSettingsViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.title = @"Settings";
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
+
+    [self setupInterface];
+    [self loadSettingsValues];
+    [self refreshStorageUsage];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self loadSettingsValues];
+    [self refreshStorageUsage];
+}
+
+- (void)setupInterface {
+    UIScrollView *scrollView = [[UIScrollView alloc] init];
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollView.alwaysBounceVertical = YES;
+    scrollView.backgroundColor = UIColor.systemBackgroundColor;
+
+    UIStackView *contentStack = [[UIStackView alloc] init];
+    contentStack.translatesAutoresizingMaskIntoConstraints = NO;
+    contentStack.axis = UILayoutConstraintAxisVertical;
+    contentStack.spacing = 10.0;
+
+    [self.view addSubview:scrollView];
+    [scrollView addSubview:contentStack];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [scrollView.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [scrollView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [scrollView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+
+        [contentStack.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor constant:8.0],
+        [contentStack.leadingAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.leadingAnchor constant:16.0],
+        [contentStack.trailingAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.trailingAnchor constant:-16.0],
+        [contentStack.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor constant:-20.0]
+    ]];
+
+    [contentStack addArrangedSubview:[self sectionHeadingWithText:@"Customization"]];
+    UIStackView *customizationStack = [self addSectionCardToStack:contentStack];
+
+    UISegmentedControl *fontControl = [[UISegmentedControl alloc] initWithItems:@[@"System", @"Serif"]];
+    [fontControl addTarget:self action:@selector(fontChanged:) forControlEvents:UIControlEventValueChanged];
+    self.fontControl = fontControl;
+    [customizationStack addArrangedSubview:[self segmentedRowWithTitle:@"Font"
+                                                              subtitle:@"Player title and artist font"
+                                                               control:fontControl]];
+
+    UISegmentedControl *artworkStyleControl = [[UISegmentedControl alloc] initWithItems:@[@"Square", @"Rounded"]];
+    [artworkStyleControl addTarget:self action:@selector(artworkStyleChanged:) forControlEvents:UIControlEventValueChanged];
+    self.artworkStyleControl = artworkStyleControl;
+    [customizationStack addArrangedSubview:[self segmentedRowWithTitle:@"Artwork style"
+                                                              subtitle:@"Cover corners in player"
+                                                               control:artworkStyleControl]];
+
+    UILabel *accentColorValue = [self valueLabel];
+    self.accentColorValueLabel = accentColorValue;
+    [customizationStack addArrangedSubview:[self selectableValueRowWithTitle:@"Accent color"
+                                                                     subtitle:@"Any color for active controls"
+                                                                   valueLabel:accentColorValue
+                                                                       action:@selector(selectAccentColorTapped)]];
+
+    [contentStack addArrangedSubview:[self sectionHeadingWithText:@"Sound"]];
+    UIStackView *soundStack = [self addSectionCardToStack:contentStack];
+
+    UISwitch *artworkEqualizerSwitch = [[UISwitch alloc] init];
+    [artworkEqualizerSwitch addTarget:self action:@selector(artworkEqualizerChanged:) forControlEvents:UIControlEventValueChanged];
+    self.artworkEqualizerSwitch = artworkEqualizerSwitch;
+    [soundStack addArrangedSubview:[self switchRowWithTitle:@"Cover equalizer"
+                                                   subtitle:@"Show animated badge on artwork while playing"
+                                                    control:artworkEqualizerSwitch]];
+
+    UILabel *gapValue = [self valueLabel];
+    self.trackGapValueLabel = gapValue;
+    [soundStack addArrangedSubview:[self selectableValueRowWithTitle:@"Delay between tracks"
+                                                            subtitle:@""
+                                                          valueLabel:gapValue
+                                                              action:@selector(selectTrackGapTapped)]];
+
+    [contentStack addArrangedSubview:[self sectionHeadingWithText:@"Memory"]];
+    UIStackView *memoryStack = [self addSectionCardToStack:contentStack];
+
+    UILabel *usedStorageValue = [self valueLabel];
+    self.usedStorageValueLabel = usedStorageValue;
+    [memoryStack addArrangedSubview:[self infoRowWithTitle:@"Used by app + songs"
+                                                     value:@"0 MB"
+                                                valueLabel:usedStorageValue]];
+
+    UILabel *maxStorageValue = [self valueLabel];
+    self.maxStorageValueLabel = maxStorageValue;
+    [memoryStack addArrangedSubview:[self selectableValueRowWithTitle:@"Max player space"
+                                                             subtitle:@""
+                                                           valueLabel:maxStorageValue
+                                                               action:@selector(selectMaxStorageTapped)]];
+
+    UISwitch *preservePlayerModesSwitch = [[UISwitch alloc] init];
+    [preservePlayerModesSwitch addTarget:self action:@selector(preservePlayerModesChanged:) forControlEvents:UIControlEventValueChanged];
+    self.preservePlayerModesSwitch = preservePlayerModesSwitch;
+    [memoryStack addArrangedSubview:[self switchRowWithTitle:@"Preserve player settings"
+                                                    subtitle:@"Keep shuffle/repeat after app restart"
+                                                     control:preservePlayerModesSwitch]];
+
+    [contentStack addArrangedSubview:[self sectionHeadingWithText:@"About"]];
+    UIStackView *aboutStack = [self addSectionCardToStack:contentStack];
+
+    UIView *githubRow = [self infoRowWithTitle:@"GitHub project"
+                                         value:SonoraSettingsGitHubDisplayString
+                                    valueLabel:nil];
+    githubRow.userInteractionEnabled = YES;
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openGitHubTapped)];
+    [githubRow addGestureRecognizer:tap];
+    [aboutStack addArrangedSubview:githubRow];
+
+    [aboutStack addArrangedSubview:[self infoRowWithTitle:@"Developers"
+                                                    value:@"hippopotamus"
+                                               valueLabel:nil]];
+    [aboutStack addArrangedSubview:[self infoRowWithTitle:@"Version"
+                                                    value:[self appVersionLabel]
+                                               valueLabel:nil]];
+    [aboutStack addArrangedSubview:[self infoRowWithTitle:@"Storage path"
+                                                    value:[self abbreviatedStoragePathDisplayValue]
+                                               valueLabel:nil]];
+}
+
+- (UILabel *)sectionHeadingWithText:(NSString *)text {
+    UILabel *label = [[UILabel alloc] init];
+    label.font = SonoraYSMusicFont(24.0);
+    label.textColor = UIColor.labelColor;
+    label.text = text;
+    return label;
+}
+
+- (UIStackView *)addSectionCardToStack:(UIStackView *)parent {
+    UIView *container = [[UIView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    container.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+        if (trait.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.06];
+        }
+        return [UIColor colorWithWhite:0.0 alpha:0.03];
+    }];
+    container.layer.cornerRadius = 16.0;
+    container.layer.borderWidth = 1.0;
+    container.layer.borderColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+        if (trait.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.12];
+        }
+        return [UIColor colorWithWhite:0.0 alpha:0.09];
+    }].CGColor;
+    [parent addArrangedSubview:container];
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 12.0;
+    [container addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:container.topAnchor constant:12.0],
+        [stack.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:14.0],
+        [stack.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-14.0],
+        [stack.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-12.0]
+    ]];
+    return stack;
+}
+
+- (UILabel *)valueLabel {
+    UILabel *label = [[UILabel alloc] init];
+    label.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
+    label.textColor = UIColor.labelColor;
+    label.textAlignment = NSTextAlignmentRight;
+    label.numberOfLines = 1;
+    return label;
+}
+
+- (UIView *)switchRowWithTitle:(NSString *)title
+                      subtitle:(NSString *)subtitle
+                       control:(UISwitch *)control {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.text = title;
+    titleLabel.numberOfLines = 1;
+
+    UILabel *subtitleLabel = [[UILabel alloc] init];
+    subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
+    subtitleLabel.textColor = UIColor.secondaryLabelColor;
+    subtitleLabel.text = subtitle;
+    subtitleLabel.numberOfLines = 2;
+
+    UIStackView *textStack = [[UIStackView alloc] initWithArrangedSubviews:@[titleLabel, subtitleLabel]];
+    textStack.translatesAutoresizingMaskIntoConstraints = NO;
+    textStack.axis = UILayoutConstraintAxisVertical;
+    textStack.spacing = 2.0;
+
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [row addSubview:textStack];
+    [row addSubview:control];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [textStack.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [textStack.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [textStack.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [textStack.trailingAnchor constraintLessThanOrEqualToAnchor:control.leadingAnchor constant:-10.0],
+
+        [control.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [control.centerYAnchor constraintEqualToAnchor:row.centerYAnchor]
+    ]];
+    return row;
+}
+
+- (UIView *)segmentedRowWithTitle:(NSString *)title
+                         subtitle:(NSString *)subtitle
+                          control:(UISegmentedControl *)control {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.text = title;
+
+    UILabel *subtitleLabel = [[UILabel alloc] init];
+    subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
+    subtitleLabel.textColor = UIColor.secondaryLabelColor;
+    subtitleLabel.text = subtitle;
+    subtitleLabel.numberOfLines = 2;
+
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [row addSubview:titleLabel];
+    [row addSubview:subtitleLabel];
+    [row addSubview:control];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+
+        [subtitleLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:2.0],
+        [subtitleLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+        [subtitleLabel.trailingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor],
+
+        [control.topAnchor constraintEqualToAnchor:subtitleLabel.bottomAnchor constant:8.0],
+        [control.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [control.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [control.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
+    ]];
+    return row;
+}
+
+- (UIControl *)selectableValueRowWithTitle:(NSString *)title
+                                  subtitle:(NSString *)subtitle
+                                valueLabel:(UILabel *)valueLabel
+                                    action:(SEL)action {
+    UIControl *row = [[UIControl alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.text = title;
+    titleLabel.numberOfLines = 1;
+
+    UILabel *subtitleLabel = [[UILabel alloc] init];
+    subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
+    subtitleLabel.textColor = UIColor.secondaryLabelColor;
+    subtitleLabel.text = subtitle;
+    subtitleLabel.numberOfLines = 2;
+
+    UILabel *chevronLabel = [[UILabel alloc] init];
+    chevronLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    chevronLabel.text = @"›";
+    chevronLabel.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightRegular];
+    chevronLabel.textColor = UIColor.tertiaryLabelColor;
+
+    valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    valueLabel.textAlignment = NSTextAlignmentRight;
+
+    [row addSubview:titleLabel];
+    [row addSubview:subtitleLabel];
+    [row addSubview:valueLabel];
+    [row addSubview:chevronLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:valueLabel.leadingAnchor constant:-8.0],
+
+        [valueLabel.trailingAnchor constraintEqualToAnchor:chevronLabel.leadingAnchor constant:-4.0],
+        [valueLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+
+        [chevronLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [chevronLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+
+        [subtitleLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:2.0],
+        [subtitleLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+        [subtitleLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [subtitleLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
+    ]];
+
+    return row;
+}
+
+- (UIView *)infoRowWithTitle:(NSString *)title
+                       value:(NSString *)value
+                  valueLabel:(UILabel * _Nullable)valueLabel {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+    titleLabel.textColor = UIColor.secondaryLabelColor;
+    titleLabel.text = title;
+    titleLabel.numberOfLines = 1;
+
+    UILabel *valueTextLabel = valueLabel ?: [[UILabel alloc] init];
+    valueTextLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    valueTextLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
+    valueTextLabel.textColor = UIColor.labelColor;
+    valueTextLabel.text = value;
+    valueTextLabel.numberOfLines = 1;
+    valueTextLabel.textAlignment = NSTextAlignmentRight;
+
+    [row addSubview:titleLabel];
+    [row addSubview:valueTextLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [titleLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:valueTextLabel.leadingAnchor constant:-8.0],
+
+        [valueTextLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [valueTextLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor]
+    ]];
+    if (valueLabel != nil) {
+        valueLabel.text = value;
+    }
+    return row;
+}
+
+- (void)loadSettingsValues {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSInteger font = [defaults objectForKey:SonoraSettingsFontKey] ? [defaults integerForKey:SonoraSettingsFontKey] : 0;
+    NSInteger artworkStyle = [defaults objectForKey:SonoraSettingsArtworkStyleKey] ? [defaults integerForKey:SonoraSettingsArtworkStyleKey] : 1;
+    BOOL artworkEqualizerEnabled = [defaults objectForKey:SonoraSettingsArtworkEqualizerKey] ? [defaults boolForKey:SonoraSettingsArtworkEqualizerKey] : YES;
+    BOOL preserveModes = [defaults objectForKey:SonoraSettingsPreservePlayerModesKey] ? [defaults boolForKey:SonoraSettingsPreservePlayerModesKey] : YES;
+    double trackGap = [defaults objectForKey:SonoraSettingsTrackGapKey] ? [defaults doubleForKey:SonoraSettingsTrackGapKey] : 0.0;
+    NSInteger maxStorageMB = [defaults objectForKey:SonoraSettingsMaxStorageMBKey] ? [defaults integerForKey:SonoraSettingsMaxStorageMBKey] : -1;
+
+    if (font > 1) {
+        font = 0;
+        [defaults setInteger:font forKey:SonoraSettingsFontKey];
+    }
+
+    self.fontControl.selectedSegmentIndex = MAX(0, MIN(1, font));
+    self.artworkStyleControl.selectedSegmentIndex = MAX(0, MIN(1, artworkStyle));
+    self.artworkEqualizerSwitch.on = artworkEqualizerEnabled;
+    self.preservePlayerModesSwitch.on = preserveModes;
+
+    double snappedGap = [self nearestTrackGapValueForValue:trackGap];
+    NSInteger snappedMaxStorage = [self nearestMaxStorageValueForValue:maxStorageMB];
+    [defaults setDouble:snappedGap forKey:SonoraSettingsTrackGapKey];
+    [defaults setInteger:snappedMaxStorage forKey:SonoraSettingsMaxStorageMBKey];
+    [self refreshTrackGapLabel];
+    [self refreshMaxStorageLabel];
+    [self refreshAccentColorLabel];
+}
+
+- (void)fontChanged:(UISegmentedControl *)sender {
+    [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:SonoraSettingsFontKey];
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)artworkStyleChanged:(UISegmentedControl *)sender {
+    [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:SonoraSettingsArtworkStyleKey];
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)preservePlayerModesChanged:(UISwitch *)sender {
+    [NSUserDefaults.standardUserDefaults setBool:sender.isOn forKey:SonoraSettingsPreservePlayerModesKey];
+}
+
+- (UIColor *)currentAccentColor {
+    return SonoraHomeAccentYellowColor();
+}
+
+- (NSString *)hexStringForColor:(UIColor *)color {
+    if (color == nil) {
+        return @"#FFD414";
+    }
+
+    CGFloat red = 0.0;
+    CGFloat green = 0.0;
+    CGFloat blue = 0.0;
+    CGFloat alpha = 0.0;
+    if (![color getRed:&red green:&green blue:&blue alpha:&alpha]) {
+        CGFloat white = 0.0;
+        if ([color getWhite:&white alpha:&alpha]) {
+            red = white;
+            green = white;
+            blue = white;
+        } else {
+            return @"#FFD414";
+        }
+    }
+
+    NSInteger r = (NSInteger)lround(MAX(0.0, MIN(1.0, red)) * 255.0);
+    NSInteger g = (NSInteger)lround(MAX(0.0, MIN(1.0, green)) * 255.0);
+    NSInteger b = (NSInteger)lround(MAX(0.0, MIN(1.0, blue)) * 255.0);
+    return [NSString stringWithFormat:@"#%02lX%02lX%02lX", (long)r, (long)g, (long)b];
+}
+
+- (void)storeAccentColor:(UIColor *)color {
+    NSString *hex = [self hexStringForColor:color];
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setObject:hex forKey:SonoraSettingsAccentHexKey];
+    [defaults removeObjectForKey:SonoraSettingsLegacyAccentColorKey];
+}
+
+- (void)refreshAccentColorLabel {
+    self.accentColorValueLabel.text = [self hexStringForColor:[self currentAccentColor]];
+}
+
+- (void)selectAccentColorTapped {
+    if (@available(iOS 14.0, *)) {
+        UIColorPickerViewController *picker = [[UIColorPickerViewController alloc] init];
+        picker.selectedColor = [self currentAccentColor];
+        picker.supportsAlpha = NO;
+        picker.delegate = self;
+        [self presentViewController:picker animated:YES completion:nil];
+        return;
+    }
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Unavailable"
+                                                                   message:@"Color picker requires iOS 14 or newer."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)viewController API_AVAILABLE(ios(14.0)) {
+    [self storeAccentColor:viewController.selectedColor];
+    [self refreshAccentColorLabel];
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)viewController API_AVAILABLE(ios(14.0)) {
+    [self storeAccentColor:viewController.selectedColor];
+    [self refreshAccentColorLabel];
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)artworkEqualizerChanged:(UISwitch *)sender {
+    [NSUserDefaults.standardUserDefaults setBool:sender.isOn forKey:SonoraSettingsArtworkEqualizerKey];
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)selectTrackGapTapped {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    double current = [self nearestTrackGapValueForValue:[defaults doubleForKey:SonoraSettingsTrackGapKey]];
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Delay between tracks"
+                                                                   message:[NSString stringWithFormat:@"Current: %@", [self trackGapLabelForSeconds:current]]
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSNumber *value in [self trackGapOptionValues]) {
+        double seconds = value.doubleValue;
+        NSString *title = [self trackGapLabelForSeconds:seconds];
+        [sheet addAction:[UIAlertAction actionWithTitle:title
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction * _Nonnull action) {
+            [NSUserDefaults.standardUserDefaults setDouble:seconds forKey:SonoraSettingsTrackGapKey];
+            [self refreshTrackGapLabel];
+            [self notifyPlayerSettingsChanged];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self configurePopoverForSheet:sheet];
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)selectMaxStorageTapped {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSInteger current = [self nearestMaxStorageValueForValue:[defaults integerForKey:SonoraSettingsMaxStorageMBKey]];
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Max player space"
+                                                                   message:[NSString stringWithFormat:@"Current: %@", [self storageLabelForMB:current]]
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSNumber *value in [self maxStorageOptionValues]) {
+        NSInteger sizeMB = value.integerValue;
+        NSString *title = [self storageLabelForMB:sizeMB];
+        [sheet addAction:[UIAlertAction actionWithTitle:title
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction * _Nonnull action) {
+            [NSUserDefaults.standardUserDefaults setInteger:sizeMB forKey:SonoraSettingsMaxStorageMBKey];
+            [self refreshMaxStorageLabel];
+            [self refreshStorageUsage];
+            [self presentStorageLimitExceededAlertIfNeeded];
+            [self notifyPlayerSettingsChanged];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self configurePopoverForSheet:sheet];
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)configurePopoverForSheet:(UIAlertController *)sheet {
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover == nil) {
+        return;
+    }
+    popover.sourceView = self.view;
+    popover.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1.0, 1.0);
+    popover.permittedArrowDirections = UIPopoverArrowDirectionUnknown;
+}
+
+- (NSArray<NSNumber *> *)trackGapOptionValues {
+    return @[@0.0, @0.5, @1.0, @1.5, @2.0, @3.0, @5.0, @8.0];
+}
+
+- (NSArray<NSNumber *> *)maxStorageOptionValues {
+    return @[@0, @512, @1024, @2048, @3072, @4096, @6144, @8192];
+}
+
+- (double)nearestTrackGapValueForValue:(double)value {
+    double nearest = 0.0;
+    double nearestDelta = DBL_MAX;
+    for (NSNumber *candidate in [self trackGapOptionValues]) {
+        double current = candidate.doubleValue;
+        double delta = fabs(current - value);
+        if (delta < nearestDelta) {
+            nearestDelta = delta;
+            nearest = current;
+        }
+    }
+    return nearest;
+}
+
+- (NSInteger)nearestMaxStorageValueForValue:(NSInteger)value {
+    if (value <= 0) {
+        return 0;
+    }
+    NSInteger nearest = 2048;
+    NSInteger nearestDelta = NSIntegerMax;
+    for (NSNumber *candidate in [self maxStorageOptionValues]) {
+        NSInteger current = candidate.integerValue;
+        if (current <= 0) {
+            continue;
+        }
+        NSInteger delta = labs(current - value);
+        if (delta < nearestDelta) {
+            nearestDelta = delta;
+            nearest = current;
+        }
+    }
+    return nearest;
+}
+
+- (NSString *)trackGapLabelForSeconds:(double)seconds {
+    if (seconds <= 0.01) {
+        return @"Off";
+    }
+    double rounded = round(seconds * 10.0) / 10.0;
+    if (fabs(rounded - round(rounded)) < 0.05) {
+        return [NSString stringWithFormat:@"%ld s", (long)lround(rounded)];
+    }
+    return [NSString stringWithFormat:@"%.1f s", rounded];
+}
+
+- (NSString *)storageLabelForMB:(NSInteger)sizeMB {
+    if (sizeMB <= 0) {
+        return @"Unlimited";
+    }
+    double gigabytes = ((double)sizeMB) / 1024.0;
+    double rounded = round(gigabytes * 10.0) / 10.0;
+    if (rounded >= 1.0) {
+        if (fabs(rounded - round(rounded)) < 0.05) {
+            return [NSString stringWithFormat:@"%ld GB", (long)lround(rounded)];
+        }
+        return [NSString stringWithFormat:@"%.1f GB", rounded];
+    }
+    return [NSString stringWithFormat:@"%ld MB", (long)sizeMB];
+}
+
+- (void)refreshTrackGapLabel {
+    double value = [NSUserDefaults.standardUserDefaults doubleForKey:SonoraSettingsTrackGapKey];
+    self.trackGapValueLabel.text = [self trackGapLabelForSeconds:[self nearestTrackGapValueForValue:value]];
+}
+
+- (void)refreshMaxStorageLabel {
+    NSInteger value = [NSUserDefaults.standardUserDefaults integerForKey:SonoraSettingsMaxStorageMBKey];
+    self.maxStorageValueLabel.text = [self storageLabelForMB:[self nearestMaxStorageValueForValue:value]];
+}
+
+- (void)refreshStorageUsage {
+    unsigned long long usedBytes = [self currentLibraryUsageBytes];
+    self.usedStorageValueLabel.text = [NSByteCountFormatter stringFromByteCount:(long long)usedBytes
+                                                                      countStyle:NSByteCountFormatterCountStyleFile];
+    unsigned long long maxBytes = [self maxStorageLimitBytes];
+    BOOL overLimit = (maxBytes != ULLONG_MAX && usedBytes > maxBytes);
+    self.usedStorageValueLabel.textColor = overLimit ? UIColor.systemRedColor : UIColor.labelColor;
+}
+
+- (unsigned long long)maxStorageLimitBytes {
+    NSInteger maxMB = [self nearestMaxStorageValueForValue:[NSUserDefaults.standardUserDefaults integerForKey:SonoraSettingsMaxStorageMBKey]];
+    if (maxMB <= 0) {
+        return ULLONG_MAX;
+    }
+    return ((unsigned long long)maxMB) * 1024ULL * 1024ULL;
+}
+
+- (void)presentStorageLimitExceededAlertIfNeeded {
+    unsigned long long usedBytes = [self currentLibraryUsageBytes];
+    unsigned long long maxBytes = [self maxStorageLimitBytes];
+    if (maxBytes == ULLONG_MAX) {
+        return;
+    }
+    if (usedBytes <= maxBytes) {
+        return;
+    }
+
+    NSString *usedText = [NSByteCountFormatter stringFromByteCount:(long long)usedBytes
+                                                        countStyle:NSByteCountFormatterCountStyleFile];
+    NSString *maxText = [NSByteCountFormatter stringFromByteCount:(long long)maxBytes
+                                                       countStyle:NSByteCountFormatterCountStyleFile];
+    NSString *message = [NSString stringWithFormat:@"Library size %@ is over max %@.\nNew music additions are blocked until you free space or increase Max player space.",
+                         usedText,
+                         maxText];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Storage limit exceeded"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.presentedViewController == nil) {
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    });
+}
+
+- (unsigned long long)currentLibraryUsageBytes {
+    NSURL *musicDirectoryURL = [SonoraLibraryManager.sharedManager musicDirectoryURL];
+    if (musicDirectoryURL == nil) {
+        return 0ULL;
+    }
+    return [self directorySizeAtURL:musicDirectoryURL];
+}
+
+- (unsigned long long)directorySizeAtURL:(NSURL *)url {
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    NSDirectoryEnumerator<NSURL *> *enumerator =
+    [fileManager enumeratorAtURL:url
+      includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLFileSizeKey]
+                         options:NSDirectoryEnumerationSkipsHiddenFiles
+                    errorHandler:nil];
+    unsigned long long totalBytes = 0ULL;
+    for (NSURL *fileURL in enumerator) {
+        NSNumber *isRegularFile = nil;
+        [fileURL getResourceValue:&isRegularFile forKey:NSURLIsRegularFileKey error:nil];
+        if (!isRegularFile.boolValue) {
+            continue;
+        }
+
+        NSNumber *fileSize = nil;
+        [fileURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        totalBytes += fileSize.unsignedLongLongValue;
+    }
+    return totalBytes;
+}
+
+- (NSString *)appVersionLabel {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary ?: @{};
+    NSString *shortVersion = info[@"CFBundleShortVersionString"];
+    NSString *buildVersion = info[(NSString *)kCFBundleVersionKey];
+    if (shortVersion.length > 0 && buildVersion.length > 0 && ![shortVersion isEqualToString:buildVersion]) {
+        return [NSString stringWithFormat:@"%@ (%@)", shortVersion, buildVersion];
+    }
+    if (shortVersion.length > 0) {
+        return shortVersion;
+    }
+    if (buildVersion.length > 0) {
+        return buildVersion;
+    }
+    return @"1.0";
+}
+
+- (NSString *)abbreviatedStoragePathDisplayValue {
+    NSString *fullPath = SonoraLibraryManager.sharedManager.filesDropHint ?: @"";
+    if (fullPath.length == 0) {
+        return @"-";
+    }
+
+    NSString *trimmed = [fullPath stringByReplacingOccurrencesOfString:@"Files -> " withString:@""];
+    trimmed = [trimmed stringByReplacingOccurrencesOfString:@" -> " withString:@"/"];
+    trimmed = [trimmed stringByReplacingOccurrencesOfString:@"/files" withString:@""];
+    NSString *abbreviated = [trimmed stringByAbbreviatingWithTildeInPath];
+    if (abbreviated.length <= 38) {
+        return abbreviated;
+    }
+
+    NSArray<NSString *> *parts = [abbreviated componentsSeparatedByString:@"/"];
+    NSMutableArray<NSString *> *nonEmptyParts = [NSMutableArray array];
+    for (NSString *part in parts) {
+        if (part.length > 0) {
+            [nonEmptyParts addObject:part];
+        }
+    }
+    if (nonEmptyParts.count >= 2) {
+        NSString *tail = [NSString stringWithFormat:@"%@/%@",
+                          nonEmptyParts[nonEmptyParts.count - 2],
+                          nonEmptyParts.lastObject];
+        return [NSString stringWithFormat:@".../%@", tail];
+    }
+
+    NSUInteger keep = MIN((NSUInteger)38, abbreviated.length);
+    return [abbreviated substringFromIndex:abbreviated.length - keep];
+}
+
+- (void)openGitHubTapped {
+    NSURL *url = [NSURL URLWithString:SonoraSettingsGitHubURLString];
+    if (url == nil) {
+        return;
+    }
+    [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+}
+
+- (void)notifyPlayerSettingsChanged {
+    [NSNotificationCenter.defaultCenter postNotificationName:SonoraPlayerSettingsDidChangeNotification object:nil];
+}
+
+@end
+
 @interface SonoraHomeViewController () <UICollectionViewDataSource, UICollectionViewDelegate>
 
 @property (nonatomic, strong) UICollectionView *collectionView;
@@ -1682,7 +2504,11 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
                                                                    style:UIBarButtonItemStylePlain
                                                                   target:self
                                                                   action:@selector(openHistoryTapped)];
-    self.navigationItem.rightBarButtonItems = @[clockItem];
+    UIBarButtonItem *settingsItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"gearshape"]
+                                                                      style:UIBarButtonItemStylePlain
+                                                                     target:self
+                                                                     action:@selector(openSettingsTapped)];
+    self.navigationItem.rightBarButtonItems = @[settingsItem, clockItem];
 }
 
 - (void)setupCollectionView {
@@ -2183,6 +3009,12 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
     SonoraHistoryViewController *history = [[SonoraHistoryViewController alloc] init];
     history.hidesBottomBarWhenPushed = YES;
     [self.navigationController pushViewController:history animated:YES];
+}
+
+- (void)openSettingsTapped {
+    SonoraSettingsViewController *settings = [[SonoraSettingsViewController alloc] init];
+    settings.hidesBottomBarWhenPushed = YES;
+    [self.navigationController pushViewController:settings animated:YES];
 }
 
 - (NSString *)titleForSection:(SonoraHomeSectionType)sectionType {

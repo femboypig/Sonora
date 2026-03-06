@@ -15,9 +15,11 @@
 
 NSString * const SonoraPlaybackStateDidChangeNotification = @"SonoraPlaybackStateDidChangeNotification";
 NSString * const SonoraPlaybackProgressDidChangeNotification = @"SonoraPlaybackProgressDidChangeNotification";
+NSString * const SonoraPlaybackMeterDidChangeNotification = @"SonoraPlaybackMeterDidChangeNotification";
 NSString * const SonoraPlaylistsDidChangeNotification = @"SonoraPlaylistsDidChangeNotification";
 NSString * const SonoraFavoritesDidChangeNotification = @"SonoraFavoritesDidChangeNotification";
 NSString * const SonoraSleepTimerDidChangeNotification = @"SonoraSleepTimerDidChangeNotification";
+NSString * const SonoraPlayerSettingsDidChangeNotification = @"SonoraPlayerSettingsDidChangeNotification";
 
 static NSString * const kMusicFolderName = @"Sonora";
 static NSString * const kPlaylistsDefaultsKey = @"sonora_playlists_v2";
@@ -40,6 +42,21 @@ static NSString * const kTrackMetadataCacheDurationKey = @"duration";
 static NSString * const kTrackMetadataCacheArtworkFileKey = @"artworkFile";
 static NSString * const kPlaybackHistoryDefaultsKey = @"sonora_playback_history_v1";
 static NSUInteger const kPlaybackHistoryMaxEntries = 160;
+static NSString * const kPlayerSettingsTrackGapKey = @"sonora.settings.trackGapSeconds";
+static NSString * const kPlayerSettingsSavedShuffleKey = @"sonora.settings.savedShuffleEnabled";
+static NSString * const kPlayerSettingsSavedRepeatModeKey = @"sonora.settings.savedRepeatMode";
+static NSString * const kPlayerSettingsPreserveModesKey = @"sonora.settings.preservePlayerModes";
+static NSString * const kPlaybackSessionQueueTrackIDsKey = @"sonora.playbackSession.queueTrackIDs";
+static NSString * const kPlaybackSessionCurrentTrackIDKey = @"sonora.playbackSession.currentTrackID";
+static NSString * const kPlaybackSessionCurrentTimeKey = @"sonora.playbackSession.currentTime";
+static NSString * const kPlaybackSessionWasPlayingKey = @"sonora.playbackSession.wasPlaying";
+
+static BOOL SonoraShouldPreservePlayerModes(NSUserDefaults *defaults) {
+    if ([defaults objectForKey:kPlayerSettingsPreserveModesKey] == nil) {
+        return YES;
+    }
+    return [defaults boolForKey:kPlayerSettingsPreserveModesKey];
+}
 
 static NSArray<NSString *> *SonoraLegacyPlaylistsDefaultsKeys(void) {
     return @[@"sonora_playlists_v1", @"sonora_playlists"];
@@ -2210,6 +2227,10 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 @property (nonatomic, assign) NSTimeInterval analyticsTrackDuration;
 @property (nonatomic, assign) NSTimeInterval analyticsMaxProgressTime;
 @property (nonatomic, assign) BOOL analyticsDidSeekNearEnd;
+@property (nonatomic, assign) NSUInteger automaticAdvanceRequestToken;
+@property (nonatomic, assign) float currentMeterLevel;
+@property (nonatomic, copy) NSString *pendingRestoredTrackID;
+@property (nonatomic, assign) NSTimeInterval pendingRestoredTime;
 
 @end
 
@@ -2237,6 +2258,19 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         _analyticsTrackDuration = 0.0;
         _analyticsMaxProgressTime = 0.0;
         _analyticsDidSeekNearEnd = NO;
+        _automaticAdvanceRequestToken = 0;
+        _currentMeterLevel = 0.0f;
+        _pendingRestoredTrackID = @"";
+        _pendingRestoredTime = 0.0;
+        [self restorePlaybackSessionFromDefaults];
+        [NSNotificationCenter.defaultCenter addObserver:self
+                                               selector:@selector(handleApplicationLifecyclePersist:)
+                                                   name:UIApplicationDidEnterBackgroundNotification
+                                                 object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self
+                                               selector:@selector(handleApplicationLifecyclePersist:)
+                                                   name:UIApplicationWillTerminateNotification
+                                                 object:nil];
         [self configureRemoteCommands];
         [self updateRemoteCommandAvailability];
     }
@@ -2268,6 +2302,126 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 
 - (NSArray<SonoraTrack *> *)currentQueue {
     return self.queue;
+}
+
+- (void)invalidatePendingAutomaticAdvance {
+    self.automaticAdvanceRequestToken += 1;
+}
+
+- (NSTimeInterval)configuredTrackGapSeconds {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults objectForKey:kPlayerSettingsTrackGapKey] == nil) {
+        return 0.0;
+    }
+
+    NSTimeInterval value = [defaults doubleForKey:kPlayerSettingsTrackGapKey];
+    if (!isfinite(value)) {
+        return 0.0;
+    }
+    return MIN(MAX(value, 0.0), 8.0);
+}
+
+- (void)restorePlaybackSessionFromDefaults {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    BOOL preserveModes = SonoraShouldPreservePlayerModes(defaults);
+    if (preserveModes) {
+        _shuffleEnabled = [defaults boolForKey:kPlayerSettingsSavedShuffleKey];
+        NSInteger savedRepeat = [defaults integerForKey:kPlayerSettingsSavedRepeatModeKey];
+        if (savedRepeat < SonoraRepeatModeNone || savedRepeat > SonoraRepeatModeTrack) {
+            savedRepeat = SonoraRepeatModeNone;
+        }
+        _repeatMode = (SonoraRepeatMode)savedRepeat;
+    } else {
+        _shuffleEnabled = NO;
+        _repeatMode = SonoraRepeatModeNone;
+    }
+
+    NSArray<NSString *> *savedQueueTrackIDs = [defaults arrayForKey:kPlaybackSessionQueueTrackIDsKey];
+    if (![savedQueueTrackIDs isKindOfClass:NSArray.class] || savedQueueTrackIDs.count == 0) {
+        return;
+    }
+
+    NSMutableArray<SonoraTrack *> *resolvedQueue = [NSMutableArray arrayWithCapacity:savedQueueTrackIDs.count];
+    SonoraLibraryManager *library = SonoraLibraryManager.sharedManager;
+    for (id rawID in savedQueueTrackIDs) {
+        if (![rawID isKindOfClass:NSString.class]) {
+            continue;
+        }
+        NSString *trackID = (NSString *)rawID;
+        if (trackID.length == 0) {
+            continue;
+        }
+        SonoraTrack *track = [library trackForIdentifier:trackID];
+        if (track != nil) {
+            [resolvedQueue addObject:track];
+        }
+    }
+    if (resolvedQueue.count == 0) {
+        return;
+    }
+
+    _queue = [resolvedQueue copy];
+    _currentIndex = 0;
+    NSString *savedCurrentTrackID = [defaults stringForKey:kPlaybackSessionCurrentTrackIDKey];
+    if (savedCurrentTrackID.length > 0) {
+        NSUInteger foundIndex = [resolvedQueue indexOfObjectPassingTest:^BOOL(SonoraTrack * _Nonnull obj, NSUInteger idx, __unused BOOL * _Nonnull stop) {
+            return [obj.identifier isEqualToString:savedCurrentTrackID];
+        }];
+        if (foundIndex != NSNotFound) {
+            _currentIndex = (NSInteger)foundIndex;
+        }
+    }
+
+    NSTimeInterval restoredTime = [defaults doubleForKey:kPlaybackSessionCurrentTimeKey];
+    if (!isfinite(restoredTime) || restoredTime < 0.0) {
+        restoredTime = 0.0;
+    }
+    NSString *fallbackTrackID = self.currentTrack.identifier ?: @"";
+    _pendingRestoredTrackID = (savedCurrentTrackID.length > 0) ? savedCurrentTrackID : fallbackTrackID;
+    _pendingRestoredTime = restoredTime;
+
+    [self rebuildShuffleBagIfNeeded];
+
+    // Always restore session in paused state, even if it was playing before app termination.
+}
+
+- (void)persistPlaybackSessionToDefaults {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    BOOL preserveModes = SonoraShouldPreservePlayerModes(defaults);
+    [defaults setBool:(preserveModes ? self.isShuffleEnabled : NO) forKey:kPlayerSettingsSavedShuffleKey];
+    [defaults setInteger:(preserveModes ? self.repeatMode : SonoraRepeatModeNone) forKey:kPlayerSettingsSavedRepeatModeKey];
+
+    if (self.queue.count == 0 || self.currentTrack == nil) {
+        [defaults removeObjectForKey:kPlaybackSessionQueueTrackIDsKey];
+        [defaults removeObjectForKey:kPlaybackSessionCurrentTrackIDKey];
+        [defaults removeObjectForKey:kPlaybackSessionCurrentTimeKey];
+        [defaults removeObjectForKey:kPlaybackSessionWasPlayingKey];
+        return;
+    }
+
+    NSMutableArray<NSString *> *queueTrackIDs = [NSMutableArray arrayWithCapacity:self.queue.count];
+    for (SonoraTrack *track in self.queue) {
+        if (track.identifier.length > 0) {
+            [queueTrackIDs addObject:track.identifier];
+        }
+    }
+    if (queueTrackIDs.count == 0 || self.currentTrack.identifier.length == 0) {
+        [defaults removeObjectForKey:kPlaybackSessionQueueTrackIDsKey];
+        [defaults removeObjectForKey:kPlaybackSessionCurrentTrackIDKey];
+        [defaults removeObjectForKey:kPlaybackSessionCurrentTimeKey];
+        [defaults removeObjectForKey:kPlaybackSessionWasPlayingKey];
+        return;
+    }
+
+    NSTimeInterval currentTime = (self.audioPlayer != nil) ? self.audioPlayer.currentTime : self.pendingRestoredTime;
+    if (!isfinite(currentTime) || currentTime < 0.0) {
+        currentTime = 0.0;
+    }
+
+    [defaults setObject:[queueTrackIDs copy] forKey:kPlaybackSessionQueueTrackIDsKey];
+    [defaults setObject:self.currentTrack.identifier forKey:kPlaybackSessionCurrentTrackIDKey];
+    [defaults setDouble:currentTime forKey:kPlaybackSessionCurrentTimeKey];
+    [defaults setBool:self.isPlaying forKey:kPlaybackSessionWasPlayingKey];
 }
 
 - (void)resetAnalyticsSession {
@@ -2368,6 +2522,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
+    [self invalidatePendingAutomaticAdvance];
+
     NSInteger normalizedIndex = index;
     if (normalizedIndex < 0 || normalizedIndex >= tracks.count) {
         normalizedIndex = 0;
@@ -2390,6 +2546,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
+    [self invalidatePendingAutomaticAdvance];
+
     if (self.audioPlayer == nil) {
         if (self.currentIndex == NSNotFound) {
             self.currentIndex = 0;
@@ -2402,6 +2560,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         [self.audioPlayer pause];
         [self.progressTimer invalidate];
         self.progressTimer = nil;
+        self.currentMeterLevel = 0.0f;
+        [self postMeterDidChangeWithLevel:0.0f];
     } else {
         [self.audioPlayer play];
         [self startProgressTimerIfNeeded];
@@ -2413,6 +2573,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 }
 
 - (void)playNext {
+    [self invalidatePendingAutomaticAdvance];
     [self advanceToNextTrackAutomatically:NO];
 }
 
@@ -2420,6 +2581,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     if (self.queue.count == 0) {
         return;
     }
+
+    [self invalidatePendingAutomaticAdvance];
 
     if (self.audioPlayer != nil && self.audioPlayer.currentTime > 3.0) {
         [self seekToTime:0.0];
@@ -2492,6 +2655,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     _shuffleEnabled = enabled;
     [self.shuffleHistory removeAllObjects];
     [self rebuildShuffleBagIfNeeded];
+    [self persistPlaybackSessionToDefaults];
     [self updateRemoteCommandAvailability];
     [self postStateDidChange];
 }
@@ -2513,6 +2677,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
             break;
     }
 
+    [self persistPlaybackSessionToDefaults];
     [self updateRemoteCommandAvailability];
     [self postStateDidChange];
     return self.repeatMode;
@@ -2635,6 +2800,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
+    [self invalidatePendingAutomaticAdvance];
+
     if (self.currentIndex == NSNotFound) {
         self.currentIndex = 0;
     }
@@ -2653,11 +2820,14 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 }
 
 - (void)stopPlaybackAtQueueEnd {
+    [self invalidatePendingAutomaticAdvance];
     [self.progressTimer invalidate];
     self.progressTimer = nil;
 
     [self.audioPlayer stop];
     self.audioPlayer = nil;
+    self.currentMeterLevel = 0.0f;
+    [self postMeterDidChangeWithLevel:0.0f];
     [self resetAnalyticsSession];
 
     [self updateRemoteCommandAvailability];
@@ -2705,12 +2875,16 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 }
 
 - (void)startCurrentTrack {
+    [self invalidatePendingAutomaticAdvance];
+
     if (self.currentIndex == NSNotFound && self.queue.count > 0) {
         self.currentIndex = 0;
     }
 
     SonoraTrack *track = self.currentTrack;
     if (track == nil) {
+        self.currentMeterLevel = 0.0f;
+        [self postMeterDidChangeWithLevel:0.0f];
         [self resetAnalyticsSession];
         [self updateRemoteCommandAvailability];
         return;
@@ -2725,6 +2899,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         NSLog(@"Playback init failed: %@", playerError.localizedDescription);
         [self.progressTimer invalidate];
         self.progressTimer = nil;
+        self.currentMeterLevel = 0.0f;
+        [self postMeterDidChangeWithLevel:0.0f];
         [self resetAnalyticsSession];
         [self updateRemoteCommandAvailability];
         [self postStateDidChange];
@@ -2732,12 +2908,16 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     }
 
     player.delegate = self;
+    player.meteringEnabled = YES;
+    player.volume = 1.0f;
     [player prepareToPlay];
 
     if (![player play]) {
         NSLog(@"Playback start failed for %@", track.fileName);
         [self.progressTimer invalidate];
         self.progressTimer = nil;
+        self.currentMeterLevel = 0.0f;
+        [self postMeterDidChangeWithLevel:0.0f];
         [self resetAnalyticsSession];
         [self updateRemoteCommandAvailability];
         [self postStateDidChange];
@@ -2745,6 +2925,15 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     }
 
     self.audioPlayer = player;
+    if (self.pendingRestoredTrackID.length > 0 &&
+        [self.pendingRestoredTrackID isEqualToString:track.identifier] &&
+        self.pendingRestoredTime > 0.0) {
+        player.currentTime = MIN(self.pendingRestoredTime, player.duration);
+    }
+    self.pendingRestoredTrackID = @"";
+    self.pendingRestoredTime = 0.0;
+    self.currentMeterLevel = 0.0f;
+    [self postMeterDidChangeWithLevel:0.0f];
     [SonoraPlaybackHistoryStore.sharedStore recordTrackID:track.identifier];
     [self beginAnalyticsSessionForCurrentTrack];
 
@@ -2768,6 +2957,12 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
+    [self.audioPlayer updateMeters];
+    float averagePower = [self.audioPlayer averagePowerForChannel:0];
+    float normalizedLevel = isfinite(averagePower) ? powf(10.0f, averagePower / 20.0f) : 0.0f;
+    self.currentMeterLevel = MIN(MAX(normalizedLevel, 0.0f), 1.0f);
+    [self postMeterDidChangeWithLevel:self.currentMeterLevel];
+
     [self updateAnalyticsProgressSnapshot];
     [self updateNowPlayingInfo];
     [self postProgressDidChange];
@@ -2776,7 +2971,23 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 - (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
     (void)player;
     (void)flag;
-    [self advanceToNextTrackAutomatically:YES];
+    self.currentMeterLevel = 0.0f;
+    [self postMeterDidChangeWithLevel:0.0f];
+    NSTimeInterval gapSeconds = [self configuredTrackGapSeconds];
+    if (!isfinite(gapSeconds) || gapSeconds <= 0.01) {
+        [self advanceToNextTrackAutomatically:YES];
+        return;
+    }
+
+    NSUInteger requestToken = self.automaticAdvanceRequestToken + 1;
+    self.automaticAdvanceRequestToken = requestToken;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gapSeconds * (NSTimeInterval)NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.automaticAdvanceRequestToken != requestToken) {
+            return;
+        }
+        [self advanceToNextTrackAutomatically:YES];
+    });
 }
 
 - (void)configureRemoteCommands {
@@ -2847,22 +3058,31 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 }
 
 - (MPRemoteCommandHandlerStatus)handleRemoteChangePlaybackPosition:(MPRemoteCommandEvent *)event {
-    if (self.audioPlayer == nil || self.duration <= 0.0) {
-        return MPRemoteCommandHandlerStatusCommandFailed;
-    }
-
     if (![event isKindOfClass:MPChangePlaybackPositionCommandEvent.class]) {
         return MPRemoteCommandHandlerStatusCommandFailed;
     }
 
+    if (self.currentTrack == nil || self.duration <= 0.0) {
+        return MPRemoteCommandHandlerStatusNoSuchContent;
+    }
+
     MPChangePlaybackPositionCommandEvent *positionEvent = (MPChangePlaybackPositionCommandEvent *)event;
-    [self seekToTime:positionEvent.positionTime];
+    NSTimeInterval targetTime = MAX(0.0, MIN(positionEvent.positionTime, self.duration));
+    if (self.audioPlayer != nil) {
+        [self seekToTime:targetTime];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }
+
+    self.pendingRestoredTrackID = self.currentTrack.identifier ?: @"";
+    self.pendingRestoredTime = targetTime;
+    [self updateNowPlayingInfo];
+    [self postProgressDidChange];
     return MPRemoteCommandHandlerStatusSuccess;
 }
 
 - (void)updateNowPlayingInfo {
     SonoraTrack *track = self.currentTrack;
-    if (track == nil || self.audioPlayer == nil) {
+    if (track == nil) {
         MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo = nil;
         return;
     }
@@ -2872,9 +3092,20 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     if (track.artist.length > 0) {
         info[MPMediaItemPropertyArtist] = track.artist;
     }
-    info[MPMediaItemPropertyPlaybackDuration] = @(self.audioPlayer.duration);
-    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(self.audioPlayer.currentTime);
-    info[MPNowPlayingInfoPropertyPlaybackRate] = self.audioPlayer.isPlaying ? @1.0 : @0.0;
+    NSTimeInterval duration = self.duration;
+    NSTimeInterval elapsed = (self.audioPlayer != nil) ? self.audioPlayer.currentTime : self.pendingRestoredTime;
+    if (!isfinite(duration) || duration < 0.0) {
+        duration = 0.0;
+    }
+    if (!isfinite(elapsed) || elapsed < 0.0) {
+        elapsed = 0.0;
+    }
+    if (duration > 0.0) {
+        elapsed = MIN(elapsed, duration);
+    }
+    info[MPMediaItemPropertyPlaybackDuration] = @(duration);
+    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(elapsed);
+    info[MPNowPlayingInfoPropertyPlaybackRate] = self.isPlaying ? @1.0 : @0.0;
     NSInteger queueCount = (NSInteger)self.queue.count;
     NSInteger queueIndex = self.currentIndex;
     if (queueCount > 0) {
@@ -2902,7 +3133,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     MPRemoteCommandCenter *center = MPRemoteCommandCenter.sharedCommandCenter;
     BOOL hasQueue = (self.queue.count > 0);
     BOOL canStep = (self.queue.count > 1) || self.isShuffleEnabled || (self.repeatMode != SonoraRepeatModeNone);
-    BOOL canSeek = (self.audioPlayer != nil && self.audioPlayer.duration > 0.0);
+    BOOL canSeek = hasQueue && (self.duration > 0.0);
 
     center.playCommand.enabled = hasQueue;
     center.pauseCommand.enabled = hasQueue;
@@ -2914,13 +3145,29 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     }
 }
 
+- (void)handleApplicationLifecyclePersist:(NSNotification *)notification {
+    (void)notification;
+    [self persistPlaybackSessionToDefaults];
+}
+
 - (void)postStateDidChange {
     [self updateRemoteCommandAvailability];
+    [self persistPlaybackSessionToDefaults];
     [NSNotificationCenter.defaultCenter postNotificationName:SonoraPlaybackStateDidChangeNotification object:self];
 }
 
 - (void)postProgressDidChange {
+    [self persistPlaybackSessionToDefaults];
     [NSNotificationCenter.defaultCenter postNotificationName:SonoraPlaybackProgressDidChangeNotification object:self];
+}
+
+- (void)postMeterDidChangeWithLevel:(float)level {
+    NSDictionary<NSString *, NSNumber *> *userInfo = @{
+        @"level": @(MIN(MAX(level, 0.0f), 1.0f))
+    };
+    [NSNotificationCenter.defaultCenter postNotificationName:SonoraPlaybackMeterDidChangeNotification
+                                                      object:self
+                                                    userInfo:userInfo];
 }
 
 @end
