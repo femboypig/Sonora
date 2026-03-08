@@ -2456,11 +2456,19 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 }
 
 - (void)handlePlaybackStateChanged {
-    if (self.collectionView == nil) {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self handlePlaybackStateChanged];
+        });
         return;
     }
-    NSIndexSet *heroSection = [NSIndexSet indexSetWithIndex:(NSUInteger)SonoraHomeSectionTypeForYou];
-    [self.collectionView reloadSections:heroSection];
+
+    UICollectionView *collectionView = self.collectionView;
+    if (collectionView == nil || self.viewIfLoaded.window == nil) {
+        return;
+    }
+
+    [collectionView reloadData];
 }
 
 - (void)viewWillAppear:(BOOL)animated {

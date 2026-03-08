@@ -9,6 +9,7 @@
 #import <math.h>
 #import <PhotosUI/PhotosUI.h>
 #import <QuartzCore/QuartzCore.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "SonoraCells.h"
 #import "SonoraServices.h"
@@ -25,6 +26,27 @@ static NSString * const SonoraSettingsLegacyAccentColorKey = @"sonora.settings.a
 static NSString * const SonoraSettingsArtworkStyleKey = @"sonora.settings.artworkStyle";
 static NSString * const SonoraSettingsArtworkEqualizerKey = @"sonora.settings.showArtworkEqualizer";
 static NSString * const SonoraSettingsMaxStorageMBKey = @"sonora.settings.maxStorageMB";
+static NSString * const SonoraMiniStreamingDefaultBackendBaseURLString = @"https://api.corebrew.ru";
+static NSString * const SonoraMiniStreamingBackendSearchPath = @"/api/spotify/search";
+static NSString * const SonoraMiniStreamingBackendDownloadPath = @"/api/download";
+static NSString * const SonoraMiniStreamingSpotifyTokenURLString = @"https://accounts.spotify.com/api/token";
+static NSString * const SonoraMiniStreamingSpotifySearchURLString = @"https://api.spotify.com/v1/search";
+static NSString * const SonoraMiniStreamingRapidAPIDownloadURLString = @"https://spotify-music-mp3-downloader-api.p.rapidapi.com/download";
+static NSString * const SonoraMiniStreamingRapidAPIDownloader9URLString = @"https://spotify-downloader9.p.rapidapi.com/downloadSong";
+static NSString * const SonoraMiniStreamingRapidAPIDownloader9Host = @"spotify-downloader9.p.rapidapi.com";
+static NSString * const SonoraMiniStreamingDefaultRapidAPIHost = @"spotify-music-mp3-downloader-api.p.rapidapi.com";
+static NSString * const SonoraMiniStreamingKeyBrokerAvailableURLString = @"https://api.corebrew.ru/api/available";
+static NSString * const SonoraMiniStreamingKeyBrokerMarkURLString = @"https://api.corebrew.ru/api/mark";
+static NSString * const SonoraMiniStreamingErrorDomain = @"SonoraMiniStreamingErrorDomain";
+static NSString * const SonoraMiniStreamingPlaceholderPrefix = @"mini-streaming-placeholder-";
+static NSString * const SonoraMiniStreamingInstalledTrackMapDefaultsKey = @"sonora.ministreaming.installedTrackPathsByTrackID.v1";
+static NSString * const SonoraMiniStreamingInstallUnavailableMessage = @"Установка временно недоступна, попробуйте завтра.";
+static NSUInteger const SonoraMiniStreamingSearchLimit = 8;
+
+static NSString *SonoraSleepTimerRemainingString(NSTimeInterval interval);
+static void SonoraPresentSleepTimerActionSheet(UIViewController *controller,
+                                               UIView *sourceView,
+                                               dispatch_block_t updateHandler);
 
 typedef NS_ENUM(NSInteger, SonoraPlayerFontStyle) {
     SonoraPlayerFontStyleSystem = 0,
@@ -260,6 +282,102 @@ static NSString *SonoraNormalizedSearchText(NSString *text) {
     return trimmed.lowercaseString ?: @"";
 }
 
+static NSString *SonoraTrimmedStringValue(id value) {
+    if (![value isKindOfClass:NSString.class]) {
+        return @"";
+    }
+    NSString *trimmed = [(NSString *)value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return trimmed ?: @"";
+}
+
+static NSString *SonoraMiniStreamingConfigValue(NSString *key, NSString *fallback) {
+    NSString *environmentValue = SonoraTrimmedStringValue(NSProcessInfo.processInfo.environment[key]);
+    if (environmentValue.length > 0) {
+        return environmentValue;
+    }
+
+    NSString *plistValue = SonoraTrimmedStringValue([NSBundle.mainBundle objectForInfoDictionaryKey:key]);
+    if (plistValue.length > 0) {
+        return plistValue;
+    }
+
+    return SonoraTrimmedStringValue(fallback);
+}
+
+static NSString *SonoraSanitizedFileComponent(NSString *value) {
+    NSString *trimmed = SonoraTrimmedStringValue(value);
+    if (trimmed.length == 0) {
+        return @"";
+    }
+
+    NSMutableCharacterSet *invalid = [NSMutableCharacterSet characterSetWithCharactersInString:@"<>:\"/\\|?*"];
+    [invalid formUnionWithCharacterSet:NSCharacterSet.controlCharacterSet];
+    NSArray<NSString *> *parts = [trimmed componentsSeparatedByCharactersInSet:invalid];
+    NSString *joined = [parts componentsJoinedByString:@""];
+    NSString *normalizedSpaces = [joined stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    while ([normalizedSpaces containsString:@"  "]) {
+        normalizedSpaces = [normalizedSpaces stringByReplacingOccurrencesOfString:@"  " withString:@" "];
+    }
+    return normalizedSpaces ?: @"";
+}
+
+static NSSet<NSString *> *SonoraSupportedAudioExtensions(void) {
+    static NSSet<NSString *> *extensions;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        extensions = [NSSet setWithArray:@[@"mp3", @"m4a", @"aac", @"wav", @"aiff", @"flac", @"caf"]];
+    });
+    return extensions;
+}
+
+static UIImage *SonoraMiniStreamingPlaceholderArtwork(NSString *seed, CGSize size) {
+    CGSize normalizedSize = CGSizeMake(MAX(size.width, 180.0), MAX(size.height, 180.0));
+    NSString *title = SonoraTrimmedStringValue(seed);
+    if (title.length == 0) {
+        title = @"Track";
+    }
+
+    NSUInteger hash = title.hash;
+    CGFloat hue = ((CGFloat)(hash % 360u)) / 360.0f;
+    UIColor *baseColor = [UIColor colorWithHue:hue saturation:0.52 brightness:0.82 alpha:1.0];
+    UIColor *secondaryColor = [UIColor colorWithHue:fmod(hue + 0.12, 1.0) saturation:0.58 brightness:0.64 alpha:1.0];
+
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:normalizedSize];
+    return [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext * _Nonnull context) {
+        CGRect rect = CGRectMake(0, 0, normalizedSize.width, normalizedSize.height);
+        CAGradientLayer *gradient = [CAGradientLayer layer];
+        gradient.frame = rect;
+        gradient.startPoint = CGPointMake(0.0, 0.0);
+        gradient.endPoint = CGPointMake(1.0, 1.0);
+        gradient.colors = @[
+            (__bridge id)baseColor.CGColor,
+            (__bridge id)secondaryColor.CGColor
+        ];
+        [gradient renderInContext:UIGraphicsGetCurrentContext()];
+
+        NSString *symbol = [title substringToIndex:MIN((NSUInteger)1, title.length)].uppercaseString;
+        NSDictionary<NSAttributedStringKey, id> *attributes = @{
+            NSFontAttributeName: [UIFont systemFontOfSize:normalizedSize.width * 0.34 weight:UIFontWeightBold],
+            NSForegroundColorAttributeName: UIColor.whiteColor
+        };
+        CGSize textSize = [symbol sizeWithAttributes:attributes];
+        CGRect textRect = CGRectMake((normalizedSize.width - textSize.width) * 0.5,
+                                     (normalizedSize.height - textSize.height) * 0.5,
+                                     textSize.width,
+                                     textSize.height);
+        [symbol drawInRect:textRect withAttributes:attributes];
+    }];
+}
+
+static NSError *SonoraMiniStreamingError(NSInteger code, NSString *message) {
+    NSString *resolvedMessage = message.length > 0 ? message : @"Unexpected mini streaming error.";
+    return [NSError errorWithDomain:SonoraMiniStreamingErrorDomain
+                               code:code
+                           userInfo:@{
+                               NSLocalizedDescriptionKey: resolvedMessage
+                           }];
+}
+
 static BOOL SonoraTrackMatchesSearchQuery(SonoraTrack *track, NSString *query) {
     if (query.length == 0) {
         return YES;
@@ -418,6 +536,2244 @@ static NSArray<NSDictionary<NSString *, id> *> *SonoraBuildArtistSearchResults(N
     }
     return [sorted subarrayWithRange:NSMakeRange(0, limit)];
 }
+
+@interface SonoraMiniStreamingTrack : NSObject
+
+@property (nonatomic, copy) NSString *trackID;
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy) NSString *artists;
+@property (nonatomic, copy) NSString *spotifyURL;
+@property (nonatomic, copy) NSString *artworkURL;
+@property (nonatomic, assign) NSTimeInterval duration;
+
+@end
+
+@implementation SonoraMiniStreamingTrack
+@end
+
+@interface SonoraMiniStreamingArtist : NSObject
+
+@property (nonatomic, copy) NSString *artistID;
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *artworkURL;
+
+@end
+
+@implementation SonoraMiniStreamingArtist
+@end
+
+typedef void (^SonoraMiniStreamingSearchCompletion)(NSArray<SonoraMiniStreamingTrack *> *tracks, NSError * _Nullable error);
+typedef void (^SonoraMiniStreamingArtistSearchCompletion)(NSArray<SonoraMiniStreamingArtist *> *artists, NSError * _Nullable error);
+typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id> * _Nullable payload, NSError * _Nullable error);
+
+@interface SonoraMiniStreamingClient : NSObject
+
+@property (nonatomic, copy) NSString *backendBaseURL;
+@property (nonatomic, copy) NSString *spotifyClientID;
+@property (nonatomic, copy) NSString *spotifyClientSecret;
+@property (nonatomic, copy) NSString *rapidAPIHost;
+@property (nonatomic, copy) NSString *rapidAPIKey;
+@property (nonatomic, copy) NSString *brokerRapidAPIHost;
+@property (nonatomic, copy) NSString *brokerRapidAPIKey;
+@property (nonatomic, assign) NSTimeInterval brokerCredentialFetchedAt;
+@property (nonatomic, copy) NSString *spotifyAccessToken;
+@property (nonatomic, strong, nullable) NSDate *spotifyTokenExpiresAt;
+@property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, strong, nullable) NSURLSessionDataTask *currentSearchTask;
+@property (nonatomic, strong, nullable) NSURLSessionDataTask *currentArtistSearchTask;
+@property (nonatomic, strong, nullable) NSURLSessionDataTask *currentArtistTopTracksTask;
+
+- (BOOL)isConfigured;
+- (void)searchTracks:(NSString *)query
+               limit:(NSUInteger)limit
+          completion:(SonoraMiniStreamingSearchCompletion)completion;
+- (void)searchArtists:(NSString *)query
+                limit:(NSUInteger)limit
+           completion:(SonoraMiniStreamingArtistSearchCompletion)completion;
+- (void)fetchTopTracksForArtistID:(NSString *)artistID
+                            limit:(NSUInteger)limit
+                       completion:(SonoraMiniStreamingSearchCompletion)completion;
+- (void)resolveDownloadForTrackID:(NSString *)trackID
+                       completion:(SonoraMiniStreamingResolveCompletion)completion;
+
+@end
+
+@implementation SonoraMiniStreamingClient
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _backendBaseURL = SonoraMiniStreamingConfigValue(@"BACKEND_BASE_URL", SonoraMiniStreamingDefaultBackendBaseURLString);
+        if (_backendBaseURL.length == 0) {
+            _backendBaseURL = SonoraMiniStreamingDefaultBackendBaseURLString;
+        }
+        while (_backendBaseURL.length > 1 && [_backendBaseURL hasSuffix:@"/"]) {
+            _backendBaseURL = [_backendBaseURL substringToIndex:_backendBaseURL.length - 1];
+        }
+        _spotifyClientID = @"";
+        _spotifyClientSecret = @"";
+        _rapidAPIHost = @"";
+        _rapidAPIKey = @"";
+        _brokerRapidAPIHost = @"";
+        _brokerRapidAPIKey = @"";
+        _brokerCredentialFetchedAt = 0.0;
+        _spotifyAccessToken = @"";
+        _spotifyTokenExpiresAt = nil;
+        _session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration];
+    }
+    return self;
+}
+
+- (BOOL)isConfigured {
+    return (self.backendBaseURL.length > 0);
+}
+
+- (void)dispatchOnMainQueue:(dispatch_block_t)block {
+    if (block == nil) {
+        return;
+    }
+    if (NSThread.isMainThread) {
+        block();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), block);
+    }
+}
+
+- (nullable NSURL *)miniStreamingBackendURLForPath:(NSString *)path
+                                         queryItems:(nullable NSArray<NSURLQueryItem *> *)queryItems {
+    NSString *base = SonoraTrimmedStringValue(self.backendBaseURL);
+    if (base.length == 0) {
+        return nil;
+    }
+    if (![base hasPrefix:@"http://"] && ![base hasPrefix:@"https://"]) {
+        base = [NSString stringWithFormat:@"https://%@", base];
+    }
+    NSURLComponents *components = [NSURLComponents componentsWithString:base];
+    if (components == nil) {
+        return nil;
+    }
+
+    NSString *normalizedPath = SonoraTrimmedStringValue(path);
+    if (normalizedPath.length == 0) {
+        normalizedPath = @"/";
+    }
+    if (![normalizedPath hasPrefix:@"/"]) {
+        normalizedPath = [@"/" stringByAppendingString:normalizedPath];
+    }
+
+    NSString *basePath = SonoraTrimmedStringValue(components.path);
+    if (basePath.length > 0 && ![basePath isEqualToString:@"/"]) {
+        NSString *trimmedBasePath = [basePath hasSuffix:@"/"] ? [basePath substringToIndex:basePath.length - 1] : basePath;
+        normalizedPath = [trimmedBasePath stringByAppendingString:normalizedPath];
+    }
+    components.path = normalizedPath;
+    components.queryItems = queryItems.count > 0 ? queryItems : nil;
+    return components.URL;
+}
+
+- (NSDictionary *)miniStreamingPayloadNodeFromJSON:(NSDictionary *)json {
+    if (![json isKindOfClass:NSDictionary.class]) {
+        return @{};
+    }
+    NSDictionary *dataNode = [json[@"data"] isKindOfClass:NSDictionary.class] ? json[@"data"] : nil;
+    NSDictionary *nestedDataNode = [dataNode[@"data"] isKindOfClass:NSDictionary.class] ? dataNode[@"data"] : nil;
+    return nestedDataNode ?: dataNode ?: json;
+}
+
+- (NSString *)miniStreamingErrorMessageFromJSON:(NSDictionary *)json {
+    if (![json isKindOfClass:NSDictionary.class]) {
+        return @"";
+    }
+
+    NSString *message = SonoraTrimmedStringValue(json[@"message"]);
+    if (message.length > 0) {
+        return message;
+    }
+
+    id errorNode = json[@"error"];
+    if ([errorNode isKindOfClass:NSString.class]) {
+        message = SonoraTrimmedStringValue(errorNode);
+        if (message.length > 0) {
+            return message;
+        }
+    } else if ([errorNode isKindOfClass:NSDictionary.class]) {
+        message = SonoraTrimmedStringValue(((NSDictionary *)errorNode)[@"message"]);
+        if (message.length > 0) {
+            return message;
+        }
+    }
+
+    NSDictionary *dataNode = [json[@"data"] isKindOfClass:NSDictionary.class] ? json[@"data"] : nil;
+    if (dataNode != nil) {
+        message = SonoraTrimmedStringValue(dataNode[@"message"]);
+        if (message.length == 0) {
+            message = SonoraTrimmedStringValue(dataNode[@"error"]);
+        }
+        if (message.length == 0) {
+            NSDictionary *nestedDataNode = [dataNode[@"data"] isKindOfClass:NSDictionary.class] ? dataNode[@"data"] : nil;
+            message = SonoraTrimmedStringValue(nestedDataNode[@"message"]);
+            if (message.length == 0) {
+                message = SonoraTrimmedStringValue(nestedDataNode[@"error"]);
+            }
+        }
+    }
+    return message ?: @"";
+}
+
+- (void)markRapidAPIKeyBlockedForQuotaIfNeeded:(NSString *)apiKey {
+    NSString *normalizedKey = SonoraTrimmedStringValue(apiKey);
+    if (normalizedKey.length == 0) {
+        return;
+    }
+
+    NSURL *url = [NSURL URLWithString:SonoraMiniStreamingKeyBrokerMarkURLString];
+    if (url == nil) {
+        return;
+    }
+
+    NSDictionary *payload = @{
+        @"key": normalizedKey,
+        @"minutes": @(1440),
+        @"reason": @"manual"
+    };
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (body.length == 0) {
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.HTTPMethod = @"POST";
+    request.timeoutInterval = 8.0;
+    [request setValue:@"application/json" forHTTPHeaderField:@"content-type"];
+    request.HTTPBody = body;
+
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request];
+    [task resume];
+}
+
+- (void)fetchBrokerCredentialWithCompletion:(void (^)(NSString * _Nullable host, NSString * _Nullable key))completion {
+    NSString *cachedHost = SonoraTrimmedStringValue(self.brokerRapidAPIHost);
+    NSString *cachedKey = SonoraTrimmedStringValue(self.brokerRapidAPIKey);
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    if (cachedHost.length > 0 &&
+        cachedKey.length > 0 &&
+        self.brokerCredentialFetchedAt > 0.0 &&
+        (now - self.brokerCredentialFetchedAt) < 120.0) {
+        [self dispatchOnMainQueue:^{
+            completion(cachedHost, cachedKey);
+        }];
+        return;
+    }
+
+    NSURL *url = [NSURL URLWithString:SonoraMiniStreamingKeyBrokerAvailableURLString];
+    if (url == nil) {
+        [self dispatchOnMainQueue:^{
+            completion(cachedHost, cachedKey);
+        }];
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.HTTPMethod = @"GET";
+    request.timeoutInterval = 8.0;
+
+    __weak typeof(self) weakSelf = self;
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request
+                                                  completionHandler:^(NSData * _Nullable data,
+                                                                      NSURLResponse * _Nullable response,
+                                                                      NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        NSString *resolvedHost = cachedHost;
+        NSString *resolvedKey = cachedKey;
+        if (error == nil && data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSDictionary *json = [object isKindOfClass:NSDictionary.class] ? (NSDictionary *)object : nil;
+            NSDictionary *nextNode = [json[@"next"] isKindOfClass:NSDictionary.class] ? json[@"next"] : nil;
+            NSString *candidateKey = SonoraTrimmedStringValue(nextNode[@"key"]);
+            NSString *candidateHost = SonoraTrimmedStringValue(nextNode[@"host"]);
+            if (candidateKey.length > 0 && candidateHost.length > 0) {
+                resolvedHost = candidateHost;
+                resolvedKey = candidateKey;
+                strongSelf.brokerRapidAPIHost = candidateHost;
+                strongSelf.brokerRapidAPIKey = candidateKey;
+                strongSelf.brokerCredentialFetchedAt = NSDate.date.timeIntervalSince1970;
+            }
+        }
+
+        [strongSelf dispatchOnMainQueue:^{
+            completion(resolvedHost, resolvedKey);
+        }];
+    }];
+    [task resume];
+}
+
+- (void)fetchSpotifyAccessTokenWithCompletion:(void (^)(NSString * _Nullable token, NSError * _Nullable error))completion {
+    NSTimeInterval ttl = [self.spotifyTokenExpiresAt timeIntervalSinceNow];
+    if (self.spotifyAccessToken.length > 0 && ttl > 20.0) {
+        completion(self.spotifyAccessToken, nil);
+        return;
+    }
+
+    if (self.spotifyClientID.length == 0 || self.spotifyClientSecret.length == 0) {
+        completion(nil, SonoraMiniStreamingError(1001, @"Spotify credentials are missing."));
+        return;
+    }
+
+    NSURL *url = [NSURL URLWithString:SonoraMiniStreamingSpotifyTokenURLString];
+    if (url == nil) {
+        completion(nil, SonoraMiniStreamingError(1002, @"Spotify token URL is invalid."));
+        return;
+    }
+
+    NSString *credentials = [NSString stringWithFormat:@"%@:%@", self.spotifyClientID, self.spotifyClientSecret];
+    NSString *base64Auth = [[credentials dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.HTTPMethod = @"POST";
+    request.timeoutInterval = 20.0;
+    request.HTTPBody = [@"grant_type=client_credentials" dataUsingEncoding:NSUTF8StringEncoding];
+    [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:[NSString stringWithFormat:@"Basic %@", base64Auth] forHTTPHeaderField:@"Authorization"];
+
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request
+                                                 completionHandler:^(NSData * _Nullable data,
+                                                                     NSURLResponse * _Nullable response,
+                                                                     NSError * _Nullable error) {
+        if (error != nil) {
+            completion(nil, SonoraMiniStreamingError(1003, error.localizedDescription));
+            return;
+        }
+
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger statusCode = http.statusCode;
+        NSDictionary *json = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:NSDictionary.class]) {
+                json = (NSDictionary *)object;
+            }
+        }
+
+        if (statusCode < 200 || statusCode >= 300) {
+            NSString *message = SonoraTrimmedStringValue(json[@"error_description"]);
+            if (message.length == 0) {
+                message = SonoraTrimmedStringValue(json[@"error"]);
+            }
+            if (message.length == 0) {
+                message = [NSString stringWithFormat:@"Spotify token request failed (%ld).", (long)statusCode];
+            }
+            completion(nil, SonoraMiniStreamingError(1004, message));
+            return;
+        }
+
+        NSString *token = SonoraTrimmedStringValue(json[@"access_token"]);
+        if (token.length == 0) {
+            completion(nil, SonoraMiniStreamingError(1005, @"Spotify token response has no access_token."));
+            return;
+        }
+
+        NSInteger expiresIn = [json[@"expires_in"] respondsToSelector:@selector(integerValue)] ? [json[@"expires_in"] integerValue] : 3600;
+        if (expiresIn < 30) {
+            expiresIn = 30;
+        }
+
+        self.spotifyAccessToken = token;
+        self.spotifyTokenExpiresAt = [NSDate dateWithTimeIntervalSinceNow:(NSTimeInterval)MAX(30, expiresIn - 30)];
+        completion(token, nil);
+    }];
+    [task resume];
+}
+
+- (nullable SonoraMiniStreamingTrack *)miniStreamingTrackFromSpotifyItem:(NSDictionary *)item {
+    if (![item isKindOfClass:NSDictionary.class]) {
+        return nil;
+    }
+
+    NSString *trackID = SonoraTrimmedStringValue(item[@"id"]);
+    if (trackID.length == 0) {
+        return nil;
+    }
+
+    SonoraMiniStreamingTrack *track = [[SonoraMiniStreamingTrack alloc] init];
+    track.trackID = trackID;
+    track.title = SonoraTrimmedStringValue(item[@"name"]);
+    if (track.title.length == 0) {
+        track.title = @"Unknown track";
+    }
+
+    NSMutableArray<NSString *> *artists = [NSMutableArray array];
+    NSArray *artistItems = [item[@"artists"] isKindOfClass:NSArray.class] ? item[@"artists"] : @[];
+    for (id artistObject in artistItems) {
+        if (![artistObject isKindOfClass:NSDictionary.class]) {
+            continue;
+        }
+        NSString *name = SonoraTrimmedStringValue(((NSDictionary *)artistObject)[@"name"]);
+        if (name.length > 0) {
+            [artists addObject:name];
+        }
+    }
+    track.artists = artists.count > 0 ? [artists componentsJoinedByString:@", "] : @"Unknown artist";
+
+    NSDictionary *externalURLs = [item[@"external_urls"] isKindOfClass:NSDictionary.class] ? item[@"external_urls"] : nil;
+    NSString *spotifyURL = SonoraTrimmedStringValue(externalURLs[@"spotify"]);
+    if (spotifyURL.length == 0) {
+        spotifyURL = [NSString stringWithFormat:@"https://open.spotify.com/track/%@", trackID];
+    }
+    track.spotifyURL = spotifyURL;
+
+    NSDictionary *albumNode = [item[@"album"] isKindOfClass:NSDictionary.class] ? item[@"album"] : nil;
+    NSArray *images = [albumNode[@"images"] isKindOfClass:NSArray.class] ? albumNode[@"images"] : @[];
+    NSString *artworkURL = @"";
+    NSInteger bestWidth = -1;
+    for (id imageObject in images) {
+        if (![imageObject isKindOfClass:NSDictionary.class]) {
+            continue;
+        }
+        NSDictionary *imageNode = (NSDictionary *)imageObject;
+        NSString *candidateURL = SonoraTrimmedStringValue(imageNode[@"url"]);
+        if (candidateURL.length == 0) {
+            continue;
+        }
+        NSInteger width = [imageNode[@"width"] respondsToSelector:@selector(integerValue)] ? [imageNode[@"width"] integerValue] : 0;
+        if (width > bestWidth) {
+            bestWidth = width;
+            artworkURL = candidateURL;
+        } else if (bestWidth < 0 && artworkURL.length == 0) {
+            artworkURL = candidateURL;
+        }
+    }
+    track.artworkURL = artworkURL ?: @"";
+
+    NSInteger durationMS = [item[@"duration_ms"] respondsToSelector:@selector(integerValue)] ? [item[@"duration_ms"] integerValue] : 0;
+    track.duration = durationMS > 0 ? ((NSTimeInterval)durationMS / 1000.0) : 0.0;
+    return track;
+}
+
+- (void)searchTracks:(NSString *)query
+               limit:(NSUInteger)limit
+          completion:(SonoraMiniStreamingSearchCompletion)completion {
+    NSString *normalizedQuery = SonoraTrimmedStringValue(query);
+    if (normalizedQuery.length == 0) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], nil);
+        }];
+        return;
+    }
+
+    if (![self isConfigured]) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], SonoraMiniStreamingError(1101, @"Mini streaming backend is missing."));
+        }];
+        return;
+    }
+
+    if (self.currentSearchTask != nil) {
+        [self.currentSearchTask cancel];
+        self.currentSearchTask = nil;
+    }
+
+    NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
+    NSURL *backendSearchURL = [self miniStreamingBackendURLForPath:SonoraMiniStreamingBackendSearchPath
+                                                         queryItems:@[
+        [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
+        [NSURLQueryItem queryItemWithName:@"type" value:@"track"],
+        [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
+    ]];
+    if (backendSearchURL == nil) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], SonoraMiniStreamingError(1103, @"Mini streaming backend URL is invalid."));
+        }];
+        return;
+    }
+
+    NSMutableURLRequest *backendRequest = [NSMutableURLRequest requestWithURL:backendSearchURL];
+    backendRequest.HTTPMethod = @"GET";
+    backendRequest.timeoutInterval = 20.0;
+    [backendRequest setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [backendRequest setValue:@"Sonora-iOS/1.0" forHTTPHeaderField:@"User-Agent"];
+
+    __weak typeof(self) weakBackendSelf = self;
+    self.currentSearchTask = [self.session dataTaskWithRequest:backendRequest
+                                             completionHandler:^(NSData * _Nullable data,
+                                                                 NSURLResponse * _Nullable response,
+                                                                 NSError * _Nullable error) {
+        __strong typeof(weakBackendSelf) strongBackendSelf = weakBackendSelf;
+        if (strongBackendSelf == nil) {
+            return;
+        }
+        if (error != nil) {
+            if (error.code == NSURLErrorCancelled) {
+                return;
+            }
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1104, error.localizedDescription));
+            }];
+            return;
+        }
+
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger statusCode = http.statusCode;
+        NSDictionary *json = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:NSDictionary.class]) {
+                json = (NSDictionary *)object;
+            }
+        }
+
+        if (statusCode < 200 || statusCode >= 300) {
+            NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
+            if (statusCode == 451) {
+                message = @"Требуется VPN из-за региональных ограничений (451).";
+            } else if (message.length == 0) {
+                message = [NSString stringWithFormat:@"Mini streaming search failed (%ld).", (long)statusCode];
+            }
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1105, message));
+            }];
+            return;
+        }
+
+        NSDictionary *payloadNode = [strongBackendSelf miniStreamingPayloadNodeFromJSON:json ?: @{}];
+        NSDictionary *tracksNode = [payloadNode[@"tracks"] isKindOfClass:NSDictionary.class] ? payloadNode[@"tracks"] : nil;
+        NSArray *items = [tracksNode[@"items"] isKindOfClass:NSArray.class] ? tracksNode[@"items"] : @[];
+        NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray arrayWithCapacity:items.count];
+        for (id itemObject in items) {
+            SonoraMiniStreamingTrack *track = [strongBackendSelf miniStreamingTrackFromSpotifyItem:itemObject];
+            if (track != nil) {
+                [results addObject:track];
+            }
+        }
+
+        [strongBackendSelf dispatchOnMainQueue:^{
+            completion([results copy], nil);
+        }];
+    }];
+    [self.currentSearchTask resume];
+    return;
+
+    __weak typeof(self) weakSelf = self;
+    [self fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        if (tokenError != nil || token.length == 0) {
+            [strongSelf dispatchOnMainQueue:^{
+                completion(@[], tokenError ?: SonoraMiniStreamingError(1102, @"Cannot fetch Spotify token."));
+            }];
+            return;
+        }
+
+        NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
+        NSURLComponents *components = [NSURLComponents componentsWithString:SonoraMiniStreamingSpotifySearchURLString];
+        components.queryItems = @[
+            [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
+            [NSURLQueryItem queryItemWithName:@"type" value:@"track"],
+            [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
+        ];
+
+        NSURL *searchURL = components.URL;
+        if (searchURL == nil) {
+            [strongSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1103, @"Spotify search URL is invalid."));
+            }];
+            return;
+        }
+
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:searchURL];
+        request.HTTPMethod = @"GET";
+        request.timeoutInterval = 20.0;
+        [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+        strongSelf.currentSearchTask = [strongSelf.session dataTaskWithRequest:request
+                                                              completionHandler:^(NSData * _Nullable data,
+                                                                                  NSURLResponse * _Nullable response,
+                                                                                  NSError * _Nullable error) {
+            if (error != nil) {
+                if (error.code == NSURLErrorCancelled) {
+                    return;
+                }
+                [strongSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1104, error.localizedDescription));
+                }];
+                return;
+            }
+
+            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+            NSInteger statusCode = http.statusCode;
+            NSDictionary *json = nil;
+            if (data.length > 0) {
+                id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if ([object isKindOfClass:NSDictionary.class]) {
+                    json = (NSDictionary *)object;
+                }
+            }
+
+            if (statusCode < 200 || statusCode >= 300) {
+                NSString *message = nil;
+                id errorNode = json[@"error"];
+                if ([errorNode isKindOfClass:NSDictionary.class]) {
+                    message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                }
+                if (message.length == 0) {
+                    message = [NSString stringWithFormat:@"Spotify search failed (%ld).", (long)statusCode];
+                }
+                [strongSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1105, message));
+                }];
+                return;
+            }
+
+            NSDictionary *tracksNode = [json[@"tracks"] isKindOfClass:NSDictionary.class] ? json[@"tracks"] : nil;
+            NSArray *items = [tracksNode[@"items"] isKindOfClass:NSArray.class] ? tracksNode[@"items"] : @[];
+            NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray arrayWithCapacity:items.count];
+
+            for (id itemObject in items) {
+                SonoraMiniStreamingTrack *track = [strongSelf miniStreamingTrackFromSpotifyItem:itemObject];
+                if (track != nil) {
+                    [results addObject:track];
+                }
+            }
+
+            [strongSelf dispatchOnMainQueue:^{
+                completion([results copy], nil);
+            }];
+        }];
+        [strongSelf.currentSearchTask resume];
+    }];
+}
+
+- (void)searchArtists:(NSString *)query
+                limit:(NSUInteger)limit
+           completion:(SonoraMiniStreamingArtistSearchCompletion)completion {
+    NSString *normalizedQuery = SonoraTrimmedStringValue(query);
+    if (normalizedQuery.length == 0) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], nil);
+        }];
+        return;
+    }
+
+    if (![self isConfigured]) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], SonoraMiniStreamingError(1111, @"Mini streaming backend is missing."));
+        }];
+        return;
+    }
+
+    if (self.currentArtistSearchTask != nil) {
+        [self.currentArtistSearchTask cancel];
+        self.currentArtistSearchTask = nil;
+    }
+
+    NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
+    NSURL *backendSearchURL = [self miniStreamingBackendURLForPath:SonoraMiniStreamingBackendSearchPath
+                                                         queryItems:@[
+        [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
+        [NSURLQueryItem queryItemWithName:@"type" value:@"artist"],
+        [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
+    ]];
+    if (backendSearchURL == nil) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], SonoraMiniStreamingError(1113, @"Mini streaming backend URL is invalid."));
+        }];
+        return;
+    }
+
+    NSMutableURLRequest *backendRequest = [NSMutableURLRequest requestWithURL:backendSearchURL];
+    backendRequest.HTTPMethod = @"GET";
+    backendRequest.timeoutInterval = 20.0;
+    [backendRequest setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [backendRequest setValue:@"Sonora-iOS/1.0" forHTTPHeaderField:@"User-Agent"];
+
+    __weak typeof(self) weakBackendSelf = self;
+    self.currentArtistSearchTask = [self.session dataTaskWithRequest:backendRequest
+                                                    completionHandler:^(NSData * _Nullable data,
+                                                                        NSURLResponse * _Nullable response,
+                                                                        NSError * _Nullable error) {
+        __strong typeof(weakBackendSelf) strongBackendSelf = weakBackendSelf;
+        if (strongBackendSelf == nil) {
+            return;
+        }
+        if (error != nil) {
+            if (error.code == NSURLErrorCancelled) {
+                return;
+            }
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1114, error.localizedDescription));
+            }];
+            return;
+        }
+
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger statusCode = http.statusCode;
+        NSDictionary *json = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:NSDictionary.class]) {
+                json = (NSDictionary *)object;
+            }
+        }
+
+        if (statusCode < 200 || statusCode >= 300) {
+            NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
+            if (statusCode == 451) {
+                message = @"Требуется VPN из-за региональных ограничений (451).";
+            } else if (message.length == 0) {
+                message = [NSString stringWithFormat:@"Mini streaming artist search failed (%ld).", (long)statusCode];
+            }
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1115, message));
+            }];
+            return;
+        }
+
+        NSDictionary *payloadNode = [strongBackendSelf miniStreamingPayloadNodeFromJSON:json ?: @{}];
+        NSDictionary *artistsNode = [payloadNode[@"artists"] isKindOfClass:NSDictionary.class] ? payloadNode[@"artists"] : nil;
+        NSArray *items = [artistsNode[@"items"] isKindOfClass:NSArray.class] ? artistsNode[@"items"] : @[];
+        NSMutableArray<SonoraMiniStreamingArtist *> *results = [NSMutableArray arrayWithCapacity:items.count];
+        for (id itemObject in items) {
+            if (![itemObject isKindOfClass:NSDictionary.class]) {
+                continue;
+            }
+            NSDictionary *item = (NSDictionary *)itemObject;
+            NSString *artistID = SonoraTrimmedStringValue(item[@"id"]);
+            if (artistID.length == 0) {
+                continue;
+            }
+
+            SonoraMiniStreamingArtist *artist = [[SonoraMiniStreamingArtist alloc] init];
+            artist.artistID = artistID;
+            artist.name = SonoraTrimmedStringValue(item[@"name"]);
+            if (artist.name.length == 0) {
+                artist.name = @"Unknown artist";
+            }
+
+            NSArray *images = [item[@"images"] isKindOfClass:NSArray.class] ? item[@"images"] : @[];
+            NSString *artworkURL = @"";
+            NSInteger bestWidth = -1;
+            for (id imageObject in images) {
+                if (![imageObject isKindOfClass:NSDictionary.class]) {
+                    continue;
+                }
+                NSDictionary *imageNode = (NSDictionary *)imageObject;
+                NSString *candidateURL = SonoraTrimmedStringValue(imageNode[@"url"]);
+                if (candidateURL.length == 0) {
+                    continue;
+                }
+                NSInteger width = [imageNode[@"width"] respondsToSelector:@selector(integerValue)] ? [imageNode[@"width"] integerValue] : 0;
+                if (width > bestWidth) {
+                    bestWidth = width;
+                    artworkURL = candidateURL;
+                } else if (bestWidth < 0 && artworkURL.length == 0) {
+                    artworkURL = candidateURL;
+                }
+            }
+            artist.artworkURL = artworkURL ?: @"";
+            [results addObject:artist];
+        }
+
+        [strongBackendSelf dispatchOnMainQueue:^{
+            completion([results copy], nil);
+        }];
+    }];
+    [self.currentArtistSearchTask resume];
+    return;
+
+    __weak typeof(self) weakSelf = self;
+    [self fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        if (tokenError != nil || token.length == 0) {
+            [strongSelf dispatchOnMainQueue:^{
+                completion(@[], tokenError ?: SonoraMiniStreamingError(1112, @"Cannot fetch Spotify token."));
+            }];
+            return;
+        }
+
+        NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
+        NSURLComponents *components = [NSURLComponents componentsWithString:SonoraMiniStreamingSpotifySearchURLString];
+        components.queryItems = @[
+            [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
+            [NSURLQueryItem queryItemWithName:@"type" value:@"artist"],
+            [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
+        ];
+
+        NSURL *searchURL = components.URL;
+        if (searchURL == nil) {
+            [strongSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1113, @"Spotify artist search URL is invalid."));
+            }];
+            return;
+        }
+
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:searchURL];
+        request.HTTPMethod = @"GET";
+        request.timeoutInterval = 20.0;
+        [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+        strongSelf.currentArtistSearchTask = [strongSelf.session dataTaskWithRequest:request
+                                                                    completionHandler:^(NSData * _Nullable data,
+                                                                                        NSURLResponse * _Nullable response,
+                                                                                        NSError * _Nullable error) {
+            if (error != nil) {
+                if (error.code == NSURLErrorCancelled) {
+                    return;
+                }
+                [strongSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1114, error.localizedDescription));
+                }];
+                return;
+            }
+
+            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+            NSInteger statusCode = http.statusCode;
+            NSDictionary *json = nil;
+            if (data.length > 0) {
+                id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if ([object isKindOfClass:NSDictionary.class]) {
+                    json = (NSDictionary *)object;
+                }
+            }
+
+            if (statusCode < 200 || statusCode >= 300) {
+                NSString *message = nil;
+                id errorNode = json[@"error"];
+                if ([errorNode isKindOfClass:NSDictionary.class]) {
+                    message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                }
+                if (message.length == 0) {
+                    message = [NSString stringWithFormat:@"Spotify artist search failed (%ld).", (long)statusCode];
+                }
+                [strongSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1115, message));
+                }];
+                return;
+            }
+
+            NSDictionary *artistsNode = [json[@"artists"] isKindOfClass:NSDictionary.class] ? json[@"artists"] : nil;
+            NSArray *items = [artistsNode[@"items"] isKindOfClass:NSArray.class] ? artistsNode[@"items"] : @[];
+            NSMutableArray<SonoraMiniStreamingArtist *> *results = [NSMutableArray arrayWithCapacity:items.count];
+            for (id itemObject in items) {
+                if (![itemObject isKindOfClass:NSDictionary.class]) {
+                    continue;
+                }
+                NSDictionary *item = (NSDictionary *)itemObject;
+                NSString *artistID = SonoraTrimmedStringValue(item[@"id"]);
+                if (artistID.length == 0) {
+                    continue;
+                }
+
+                SonoraMiniStreamingArtist *artist = [[SonoraMiniStreamingArtist alloc] init];
+                artist.artistID = artistID;
+                artist.name = SonoraTrimmedStringValue(item[@"name"]);
+                if (artist.name.length == 0) {
+                    artist.name = @"Unknown artist";
+                }
+
+                NSArray *images = [item[@"images"] isKindOfClass:NSArray.class] ? item[@"images"] : @[];
+                NSString *artworkURL = @"";
+                NSInteger bestWidth = -1;
+                for (id imageObject in images) {
+                    if (![imageObject isKindOfClass:NSDictionary.class]) {
+                        continue;
+                    }
+                    NSDictionary *imageNode = (NSDictionary *)imageObject;
+                    NSString *candidateURL = SonoraTrimmedStringValue(imageNode[@"url"]);
+                    if (candidateURL.length == 0) {
+                        continue;
+                    }
+                    NSInteger width = [imageNode[@"width"] respondsToSelector:@selector(integerValue)] ? [imageNode[@"width"] integerValue] : 0;
+                    if (width > bestWidth) {
+                        bestWidth = width;
+                        artworkURL = candidateURL;
+                    } else if (bestWidth < 0 && artworkURL.length == 0) {
+                        artworkURL = candidateURL;
+                    }
+                }
+                artist.artworkURL = artworkURL ?: @"";
+                [results addObject:artist];
+            }
+
+            [strongSelf dispatchOnMainQueue:^{
+                completion([results copy], nil);
+            }];
+        }];
+        [strongSelf.currentArtistSearchTask resume];
+    }];
+}
+
+- (void)fetchTopTracksForArtistID:(NSString *)artistID
+                            limit:(NSUInteger)limit
+                       completion:(SonoraMiniStreamingSearchCompletion)completion {
+    NSString *normalizedArtistID = SonoraTrimmedStringValue(artistID);
+    if (normalizedArtistID.length == 0) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], SonoraMiniStreamingError(1121, @"Artist ID is empty."));
+        }];
+        return;
+    }
+
+    if (![self isConfigured]) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], SonoraMiniStreamingError(1122, @"Mini streaming backend is missing."));
+        }];
+        return;
+    }
+
+    if (self.currentArtistTopTracksTask != nil) {
+        [self.currentArtistTopTracksTask cancel];
+        self.currentArtistTopTracksTask = nil;
+    }
+
+    NSUInteger boundedLimit = (limit == 0 || limit == NSUIntegerMax) ? 200 : MIN(MAX(limit, (NSUInteger)1), (NSUInteger)200);
+    NSString *encodedArtistID = [normalizedArtistID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
+    NSString *topTracksPath = [NSString stringWithFormat:@"/api/spotify/artists/%@/top-tracks", encodedArtistID ?: @""];
+    NSURL *backendTopTracksURL = [self miniStreamingBackendURLForPath:topTracksPath
+                                                            queryItems:@[
+        [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
+    ]];
+    if (backendTopTracksURL == nil) {
+        [self dispatchOnMainQueue:^{
+            completion(@[], SonoraMiniStreamingError(1124, @"Mini streaming backend URL is invalid."));
+        }];
+        return;
+    }
+
+    NSMutableURLRequest *backendRequest = [NSMutableURLRequest requestWithURL:backendTopTracksURL];
+    backendRequest.HTTPMethod = @"GET";
+    backendRequest.timeoutInterval = 20.0;
+    [backendRequest setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [backendRequest setValue:@"Sonora-iOS/1.0" forHTTPHeaderField:@"User-Agent"];
+
+    __weak typeof(self) weakBackendSelf = self;
+    self.currentArtistTopTracksTask = [self.session dataTaskWithRequest:backendRequest
+                                                       completionHandler:^(NSData * _Nullable data,
+                                                                           NSURLResponse * _Nullable response,
+                                                                           NSError * _Nullable error) {
+        __strong typeof(weakBackendSelf) strongBackendSelf = weakBackendSelf;
+        if (strongBackendSelf == nil) {
+            return;
+        }
+        if (error != nil) {
+            if (error.code == NSURLErrorCancelled) {
+                return;
+            }
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
+            }];
+            return;
+        }
+
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger statusCode = http.statusCode;
+        NSDictionary *json = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:NSDictionary.class]) {
+                json = (NSDictionary *)object;
+            }
+        }
+
+        if (statusCode < 200 || statusCode >= 300) {
+            NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
+            if (statusCode == 451) {
+                message = @"Требуется VPN из-за региональных ограничений (451).";
+            } else if (message.length == 0) {
+                message = [NSString stringWithFormat:@"Mini streaming top tracks failed (%ld).", (long)statusCode];
+            }
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(1126, message));
+            }];
+            return;
+        }
+
+        NSDictionary *payloadNode = [strongBackendSelf miniStreamingPayloadNodeFromJSON:json ?: @{}];
+        NSArray *items = [payloadNode[@"tracks"] isKindOfClass:NSArray.class] ? payloadNode[@"tracks"] : nil;
+        if (items.count == 0) {
+            NSDictionary *tracksNode = [payloadNode[@"tracks"] isKindOfClass:NSDictionary.class] ? payloadNode[@"tracks"] : nil;
+            if (tracksNode != nil) {
+                items = [tracksNode[@"items"] isKindOfClass:NSArray.class] ? tracksNode[@"items"] : nil;
+            }
+        }
+        if (items.count == 0) {
+            items = [payloadNode[@"items"] isKindOfClass:NSArray.class] ? payloadNode[@"items"] : @[];
+        }
+
+        NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray arrayWithCapacity:items.count];
+        for (id itemObject in items) {
+            SonoraMiniStreamingTrack *track = [strongBackendSelf miniStreamingTrackFromSpotifyItem:itemObject];
+            if (track == nil || track.trackID.length == 0) {
+                continue;
+            }
+            [results addObject:track];
+            if (results.count >= boundedLimit) {
+                break;
+            }
+        }
+
+        [strongBackendSelf dispatchOnMainQueue:^{
+            completion([results copy], nil);
+        }];
+    }];
+    [self.currentArtistTopTracksTask resume];
+    return;
+
+    __weak typeof(self) weakSelf = self;
+    [self fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        if (tokenError != nil || token.length == 0) {
+            [strongSelf dispatchOnMainQueue:^{
+                completion(@[], tokenError ?: SonoraMiniStreamingError(1123, @"Cannot fetch Spotify token."));
+            }];
+            return;
+        }
+
+        BOOL unlimited = (limit == 0 || limit == NSUIntegerMax);
+        NSUInteger boundedLimit = unlimited ? NSUIntegerMax : MAX((NSUInteger)1, limit);
+        NSUInteger maxAlbumCount = unlimited ? 500 : MIN(MAX(boundedLimit * 3, (NSUInteger)60), (NSUInteger)500);
+        NSString *artistPathID = [normalizedArtistID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
+        NSMutableArray<NSDictionary<NSString *, NSString *> *> *albums = [NSMutableArray array];
+        NSMutableSet<NSString *> *seenAlbumIDs = [NSMutableSet set];
+        NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray array];
+        NSMutableSet<NSString *> *seenTrackIDs = [NSMutableSet set];
+
+        __block void (^fetchAlbumAtIndex)(NSUInteger);
+        __block void (^fetchAlbumTracksPage)(NSUInteger, NSUInteger);
+        __block void (^fetchAlbumsPage)(NSUInteger);
+        __block void (^finishWithTopTracksFallback)(void);
+
+        finishWithTopTracksFallback = ^{
+            NSString *fallbackURLString = [NSString stringWithFormat:@"https://api.spotify.com/v1/artists/%@/top-tracks?market=US", artistPathID];
+            NSURL *fallbackURL = [NSURL URLWithString:fallbackURLString];
+            if (fallbackURL == nil) {
+                [strongSelf dispatchOnMainQueue:^{
+                    completion([results copy], nil);
+                }];
+                return;
+            }
+
+            NSMutableURLRequest *fallbackRequest = [NSMutableURLRequest requestWithURL:fallbackURL];
+            fallbackRequest.HTTPMethod = @"GET";
+            fallbackRequest.timeoutInterval = 20.0;
+            [fallbackRequest setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+            strongSelf.currentArtistTopTracksTask = [strongSelf.session dataTaskWithRequest:fallbackRequest
+                                                                           completionHandler:^(NSData * _Nullable data,
+                                                                                               NSURLResponse * _Nullable response,
+                                                                                               NSError * _Nullable error) {
+                if (error != nil) {
+                    if (error.code == NSURLErrorCancelled) {
+                        return;
+                    }
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
+                    }];
+                    return;
+                }
+
+                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                NSInteger statusCode = http.statusCode;
+                NSDictionary *json = nil;
+                if (data.length > 0) {
+                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([object isKindOfClass:NSDictionary.class]) {
+                        json = (NSDictionary *)object;
+                    }
+                }
+
+                if (statusCode < 200 || statusCode >= 300) {
+                    NSString *message = nil;
+                    id errorNode = json[@"error"];
+                    if ([errorNode isKindOfClass:NSDictionary.class]) {
+                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                    }
+                    if (message.length == 0) {
+                        message = [NSString stringWithFormat:@"Spotify artist tracks failed (%ld).", (long)statusCode];
+                    }
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1126, message));
+                    }];
+                    return;
+                }
+
+                NSArray *items = [json[@"tracks"] isKindOfClass:NSArray.class] ? json[@"tracks"] : @[];
+                NSMutableArray<SonoraMiniStreamingTrack *> *fallbackTracks = [NSMutableArray arrayWithCapacity:items.count];
+                for (id itemObject in items) {
+                    SonoraMiniStreamingTrack *track = [strongSelf miniStreamingTrackFromSpotifyItem:itemObject];
+                    if (track == nil || track.trackID.length == 0) {
+                        continue;
+                    }
+                    [fallbackTracks addObject:track];
+                    if (!unlimited && fallbackTracks.count >= boundedLimit) {
+                        break;
+                    }
+                }
+
+                [strongSelf dispatchOnMainQueue:^{
+                    completion([fallbackTracks copy], nil);
+                }];
+            }];
+            [strongSelf.currentArtistTopTracksTask resume];
+        };
+
+        fetchAlbumAtIndex = ^(NSUInteger albumIndex) {
+            if (!unlimited && results.count >= boundedLimit) {
+                [strongSelf dispatchOnMainQueue:^{
+                    completion([results copy], nil);
+                }];
+                return;
+            }
+            if (albumIndex >= albums.count) {
+                if (results.count > 0) {
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion([results copy], nil);
+                    }];
+                } else {
+                    finishWithTopTracksFallback();
+                }
+                return;
+            }
+            fetchAlbumTracksPage(albumIndex, 0);
+        };
+
+        fetchAlbumTracksPage = ^(NSUInteger albumIndex, NSUInteger offset) {
+            if (albumIndex >= albums.count) {
+                fetchAlbumAtIndex(albumIndex);
+                return;
+            }
+
+            NSDictionary<NSString *, NSString *> *albumEntry = albums[albumIndex];
+            NSString *albumID = SonoraTrimmedStringValue(albumEntry[@"id"]);
+            if (albumID.length == 0) {
+                fetchAlbumAtIndex(albumIndex + 1);
+                return;
+            }
+
+            NSString *encodedAlbumID = [albumID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
+            NSString *urlString = [NSString stringWithFormat:@"https://api.spotify.com/v1/albums/%@/tracks?market=US&limit=50&offset=%lu",
+                                   encodedAlbumID,
+                                   (unsigned long)offset];
+            NSURL *requestURL = [NSURL URLWithString:urlString];
+            if (requestURL == nil) {
+                fetchAlbumAtIndex(albumIndex + 1);
+                return;
+            }
+
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL];
+            request.HTTPMethod = @"GET";
+            request.timeoutInterval = 20.0;
+            [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+            strongSelf.currentArtistTopTracksTask = [strongSelf.session dataTaskWithRequest:request
+                                                                           completionHandler:^(NSData * _Nullable data,
+                                                                                               NSURLResponse * _Nullable response,
+                                                                                               NSError * _Nullable error) {
+                if (error != nil) {
+                    if (error.code == NSURLErrorCancelled) {
+                        return;
+                    }
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
+                    }];
+                    return;
+                }
+
+                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                NSInteger statusCode = http.statusCode;
+                NSDictionary *json = nil;
+                if (data.length > 0) {
+                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([object isKindOfClass:NSDictionary.class]) {
+                        json = (NSDictionary *)object;
+                    }
+                }
+
+                if (statusCode < 200 || statusCode >= 300) {
+                    NSString *message = nil;
+                    id errorNode = json[@"error"];
+                    if ([errorNode isKindOfClass:NSDictionary.class]) {
+                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                    }
+                    if (message.length == 0) {
+                        message = [NSString stringWithFormat:@"Spotify album tracks failed (%ld).", (long)statusCode];
+                    }
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1126, message));
+                    }];
+                    return;
+                }
+
+                NSArray *items = [json[@"items"] isKindOfClass:NSArray.class] ? json[@"items"] : @[];
+                NSString *albumArtworkURL = SonoraTrimmedStringValue(albumEntry[@"artwork"]);
+                for (id itemObject in items) {
+                    if (![itemObject isKindOfClass:NSDictionary.class]) {
+                        continue;
+                    }
+                    NSDictionary *item = (NSDictionary *)itemObject;
+                    NSArray *artistNodes = [item[@"artists"] isKindOfClass:NSArray.class] ? item[@"artists"] : @[];
+                    BOOL containsArtist = (artistNodes.count == 0);
+                    for (id artistObject in artistNodes) {
+                        if (![artistObject isKindOfClass:NSDictionary.class]) {
+                            continue;
+                        }
+                        NSString *candidateID = SonoraTrimmedStringValue(((NSDictionary *)artistObject)[@"id"]);
+                        if (candidateID.length > 0 && [candidateID isEqualToString:normalizedArtistID]) {
+                            containsArtist = YES;
+                            break;
+                        }
+                    }
+                    if (!containsArtist) {
+                        continue;
+                    }
+
+                    NSMutableDictionary *normalizedItem = [item mutableCopy];
+                    if (albumArtworkURL.length > 0) {
+                        normalizedItem[@"album"] = @{@"images": @[@{@"url": albumArtworkURL}]};
+                    }
+
+                    SonoraMiniStreamingTrack *track = [strongSelf miniStreamingTrackFromSpotifyItem:normalizedItem];
+                    if (track == nil || track.trackID.length == 0) {
+                        continue;
+                    }
+                    if ([seenTrackIDs containsObject:track.trackID]) {
+                        continue;
+                    }
+                    [seenTrackIDs addObject:track.trackID];
+                    [results addObject:track];
+                    if (!unlimited && results.count >= boundedLimit) {
+                        break;
+                    }
+                }
+
+                if (!unlimited && results.count >= boundedLimit) {
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion([results copy], nil);
+                    }];
+                    return;
+                }
+
+                BOOL hasNext = SonoraTrimmedStringValue(json[@"next"]).length > 0;
+                NSUInteger nextOffset = offset + MAX(items.count, (NSUInteger)1);
+                if (hasNext && items.count > 0 && nextOffset < 2000) {
+                    fetchAlbumTracksPage(albumIndex, nextOffset);
+                    return;
+                }
+
+                fetchAlbumAtIndex(albumIndex + 1);
+            }];
+            [strongSelf.currentArtistTopTracksTask resume];
+        };
+
+        fetchAlbumsPage = ^(NSUInteger offset) {
+            NSString *urlString = [NSString stringWithFormat:@"https://api.spotify.com/v1/artists/%@/albums?include_groups=album,single&market=US&limit=50&offset=%lu",
+                                   artistPathID,
+                                   (unsigned long)offset];
+            NSURL *requestURL = [NSURL URLWithString:urlString];
+            if (requestURL == nil) {
+                [strongSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1124, @"Spotify artist albums URL is invalid."));
+                }];
+                return;
+            }
+
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL];
+            request.HTTPMethod = @"GET";
+            request.timeoutInterval = 20.0;
+            [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+            strongSelf.currentArtistTopTracksTask = [strongSelf.session dataTaskWithRequest:request
+                                                                           completionHandler:^(NSData * _Nullable data,
+                                                                                               NSURLResponse * _Nullable response,
+                                                                                               NSError * _Nullable error) {
+                if (error != nil) {
+                    if (error.code == NSURLErrorCancelled) {
+                        return;
+                    }
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
+                    }];
+                    return;
+                }
+
+                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                NSInteger statusCode = http.statusCode;
+                NSDictionary *json = nil;
+                if (data.length > 0) {
+                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([object isKindOfClass:NSDictionary.class]) {
+                        json = (NSDictionary *)object;
+                    }
+                }
+
+                if (statusCode < 200 || statusCode >= 300) {
+                    NSString *message = nil;
+                    id errorNode = json[@"error"];
+                    if ([errorNode isKindOfClass:NSDictionary.class]) {
+                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                    }
+                    if (message.length == 0) {
+                        message = [NSString stringWithFormat:@"Spotify artist albums failed (%ld).", (long)statusCode];
+                    }
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1126, message));
+                    }];
+                    return;
+                }
+
+                NSArray *items = [json[@"items"] isKindOfClass:NSArray.class] ? json[@"items"] : @[];
+                for (id itemObject in items) {
+                    if (![itemObject isKindOfClass:NSDictionary.class]) {
+                        continue;
+                    }
+                    NSDictionary *item = (NSDictionary *)itemObject;
+                    NSString *albumID = SonoraTrimmedStringValue(item[@"id"]);
+                    if (albumID.length == 0 || [seenAlbumIDs containsObject:albumID]) {
+                        continue;
+                    }
+                    [seenAlbumIDs addObject:albumID];
+                    NSString *artworkURL = @"";
+                    NSArray *images = [item[@"images"] isKindOfClass:NSArray.class] ? item[@"images"] : @[];
+                    NSInteger bestWidth = -1;
+                    for (id imageObject in images) {
+                        if (![imageObject isKindOfClass:NSDictionary.class]) {
+                            continue;
+                        }
+                        NSDictionary *imageNode = (NSDictionary *)imageObject;
+                        NSString *candidateURL = SonoraTrimmedStringValue(imageNode[@"url"]);
+                        if (candidateURL.length == 0) {
+                            continue;
+                        }
+                        NSInteger width = [imageNode[@"width"] respondsToSelector:@selector(integerValue)] ? [imageNode[@"width"] integerValue] : 0;
+                        if (width > bestWidth) {
+                            bestWidth = width;
+                            artworkURL = candidateURL;
+                        } else if (bestWidth < 0 && artworkURL.length == 0) {
+                            artworkURL = candidateURL;
+                        }
+                    }
+                    [albums addObject:@{
+                        @"id": albumID,
+                        @"artwork": artworkURL ?: @""
+                    }];
+                    if (albums.count >= maxAlbumCount) {
+                        break;
+                    }
+                }
+
+                BOOL hasNext = SonoraTrimmedStringValue(json[@"next"]).length > 0;
+                NSUInteger nextOffset = offset + MAX(items.count, (NSUInteger)1);
+                BOOL canLoadNext = (hasNext && items.count > 0 && nextOffset < 2000 && albums.count < maxAlbumCount);
+                if (canLoadNext) {
+                    fetchAlbumsPage(nextOffset);
+                    return;
+                }
+
+                fetchAlbumAtIndex(0);
+            }];
+            [strongSelf.currentArtistTopTracksTask resume];
+        };
+
+        fetchAlbumsPage(0);
+    }];
+}
+
+- (NSArray<NSDictionary<NSString *, NSString *> *> *)rapidResolveCandidatesForTrackURL:(NSString *)trackURL
+                                                                             brokerHost:(NSString *)brokerHost
+                                                                              brokerKey:(NSString *)brokerKey {
+    NSString *normalizedTrackURL = SonoraTrimmedStringValue(trackURL);
+    if (normalizedTrackURL.length == 0) {
+        return @[];
+    }
+
+    NSString *musicRequestURL = @"";
+    NSURLComponents *musicComponents = [NSURLComponents componentsWithString:SonoraMiniStreamingRapidAPIDownloadURLString];
+    if (musicComponents != nil) {
+        musicComponents.queryItems = @[
+            [NSURLQueryItem queryItemWithName:@"link" value:normalizedTrackURL]
+        ];
+        musicRequestURL = SonoraTrimmedStringValue(musicComponents.URL.absoluteString);
+    }
+
+    NSString *downloader9RequestURL = @"";
+    NSURLComponents *downloader9Components = [NSURLComponents componentsWithString:SonoraMiniStreamingRapidAPIDownloader9URLString];
+    if (downloader9Components != nil) {
+        downloader9Components.queryItems = @[
+            [NSURLQueryItem queryItemWithName:@"songId" value:normalizedTrackURL]
+        ];
+        downloader9RequestURL = SonoraTrimmedStringValue(downloader9Components.URL.absoluteString);
+    }
+
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *candidates = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenSignatures = [NSMutableSet set];
+    void (^addCandidate)(NSString *, NSString *, NSString *, NSString *) = ^(NSString *provider,
+                                                                              NSString *requestURL,
+                                                                              NSString *host,
+                                                                              NSString *apiKey) {
+        NSString *normalizedRequestURL = SonoraTrimmedStringValue(requestURL);
+        NSString *normalizedCandidateHost = SonoraTrimmedStringValue(host);
+        NSString *normalizedCandidateKey = SonoraTrimmedStringValue(apiKey);
+        if (normalizedRequestURL.length == 0 || normalizedCandidateHost.length == 0 || normalizedCandidateKey.length == 0) {
+            return;
+        }
+        NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%@",
+                               provider ?: @"",
+                               normalizedCandidateHost,
+                               normalizedCandidateKey,
+                               normalizedRequestURL];
+        if ([seenSignatures containsObject:signature]) {
+            return;
+        }
+        [seenSignatures addObject:signature];
+        [candidates addObject:@{
+            @"provider": provider ?: @"",
+            @"url": normalizedRequestURL,
+            @"host": normalizedCandidateHost,
+            @"key": normalizedCandidateKey
+        }];
+    };
+
+    addCandidate(@"downloader9", downloader9RequestURL, brokerHost, brokerKey);
+
+    return candidates;
+}
+
+- (BOOL)isRapidQuotaMessage:(NSString *)message {
+    NSString *normalizedMessage = SonoraTrimmedStringValue(message).lowercaseString;
+    if (normalizedMessage.length == 0) {
+        return NO;
+    }
+    return ([normalizedMessage containsString:@"daily quota"] ||
+            [normalizedMessage containsString:@"quota exceeded"] ||
+            [normalizedMessage containsString:@"exceeded"]);
+}
+
+- (nullable NSDictionary<NSString *, id> *)miniStreamingPayloadFromRapidJSON:(NSDictionary *)json
+                                                                      trackID:(NSString *)trackID {
+    if (![json isKindOfClass:NSDictionary.class]) {
+        return nil;
+    }
+
+    BOOL success = YES;
+    if ([json[@"success"] respondsToSelector:@selector(boolValue)]) {
+        success = [json[@"success"] boolValue];
+    }
+
+    NSDictionary *levelOneNode = [json[@"data"] isKindOfClass:NSDictionary.class] ? json[@"data"] : json;
+    if (levelOneNode == nil) {
+        return nil;
+    }
+    if ([levelOneNode[@"success"] respondsToSelector:@selector(boolValue)]) {
+        success = [levelOneNode[@"success"] boolValue];
+    }
+    NSDictionary *dataNode = [levelOneNode[@"data"] isKindOfClass:NSDictionary.class] ? levelOneNode[@"data"] : levelOneNode;
+    if ([dataNode[@"success"] respondsToSelector:@selector(boolValue)]) {
+        success = [dataNode[@"success"] boolValue];
+    }
+
+    NSArray *medias = [dataNode[@"medias"] isKindOfClass:NSArray.class] ? dataNode[@"medias"] : @[];
+    NSString *downloadLink = @"";
+    NSString *resolvedExtension = @"";
+    for (id mediaObject in medias) {
+        if (![mediaObject isKindOfClass:NSDictionary.class]) {
+            continue;
+        }
+        NSDictionary *mediaNode = (NSDictionary *)mediaObject;
+        NSString *candidateURL = SonoraTrimmedStringValue(mediaNode[@"url"]);
+        if (candidateURL.length == 0) {
+            continue;
+        }
+
+        if (downloadLink.length == 0) {
+            downloadLink = candidateURL;
+            resolvedExtension = SonoraTrimmedStringValue(mediaNode[@"extension"]);
+        }
+
+        NSString *type = SonoraTrimmedStringValue(mediaNode[@"type"]).lowercaseString;
+        NSString *ext = SonoraTrimmedStringValue(mediaNode[@"extension"]).lowercaseString;
+        if ([type isEqualToString:@"audio"] || [ext isEqualToString:@"mp3"]) {
+            downloadLink = candidateURL;
+            resolvedExtension = SonoraTrimmedStringValue(mediaNode[@"extension"]);
+            break;
+        }
+    }
+    if (downloadLink.length == 0) {
+        downloadLink = SonoraTrimmedStringValue(dataNode[@"downloadLink"]);
+    }
+    if (downloadLink.length == 0) {
+        downloadLink = SonoraTrimmedStringValue(dataNode[@"mediaUrl"]);
+    }
+    if (downloadLink.length == 0) {
+        downloadLink = SonoraTrimmedStringValue(dataNode[@"link"]);
+    }
+    if (downloadLink.length == 0) {
+        downloadLink = SonoraTrimmedStringValue(dataNode[@"url"]);
+    }
+    if (!success || downloadLink.length == 0) {
+        return nil;
+    }
+
+    NSString *resolvedTitle = SonoraTrimmedStringValue(dataNode[@"title"]);
+    NSString *resolvedArtist = SonoraTrimmedStringValue(dataNode[@"author"]);
+    if (resolvedArtist.length == 0) {
+        resolvedArtist = SonoraTrimmedStringValue(dataNode[@"artist"]);
+    }
+    NSString *resolvedAlbum = SonoraTrimmedStringValue(dataNode[@"album"]);
+    if (resolvedAlbum.length == 0) {
+        resolvedAlbum = SonoraTrimmedStringValue(dataNode[@"source"]);
+    }
+    NSString *resolvedArtwork = SonoraTrimmedStringValue(dataNode[@"thumbnail"]);
+    if (resolvedArtwork.length == 0) {
+        resolvedArtwork = SonoraTrimmedStringValue(dataNode[@"cover"]);
+    }
+    if (resolvedExtension.length == 0) {
+        NSURL *downloadURL = [NSURL URLWithString:downloadLink];
+        resolvedExtension = SonoraTrimmedStringValue(downloadURL.pathExtension).lowercaseString;
+    }
+    if (resolvedExtension.length == 0) {
+        resolvedExtension = @"mp3";
+    }
+
+    return @{
+        @"trackID": SonoraTrimmedStringValue(trackID),
+        @"title": resolvedTitle,
+        @"artist": resolvedArtist,
+        @"album": resolvedAlbum,
+        @"artworkURL": resolvedArtwork,
+        @"extension": resolvedExtension,
+        @"downloadLink": downloadLink
+    };
+}
+
+- (void)resolveDownloadForTrackID:(NSString *)trackID
+                       completion:(SonoraMiniStreamingResolveCompletion)completion {
+    NSString *normalizedTrackID = SonoraTrimmedStringValue(trackID);
+    if (normalizedTrackID.length == 0) {
+        [self dispatchOnMainQueue:^{
+            completion(nil, SonoraMiniStreamingError(1201, @"Track ID is empty."));
+        }];
+        return;
+    }
+
+    if (![self isConfigured]) {
+        [self dispatchOnMainQueue:^{
+            completion(nil, SonoraMiniStreamingError(1202, @"Mini streaming backend is missing."));
+        }];
+        return;
+    }
+
+    NSString *backendSpotifyTrackURL = [NSString stringWithFormat:@"https://open.spotify.com/track/%@", normalizedTrackID];
+    NSURL *backendDownloadURL = [self miniStreamingBackendURLForPath:SonoraMiniStreamingBackendDownloadPath
+                                                           queryItems:@[
+        [NSURLQueryItem queryItemWithName:@"trackId" value:normalizedTrackID],
+        [NSURLQueryItem queryItemWithName:@"trackUrl" value:backendSpotifyTrackURL]
+    ]];
+    if (backendDownloadURL == nil) {
+        [self dispatchOnMainQueue:^{
+            completion(nil, SonoraMiniStreamingError(1203, @"Mini streaming backend URL is invalid."));
+        }];
+        return;
+    }
+
+    NSMutableURLRequest *backendRequest = [NSMutableURLRequest requestWithURL:backendDownloadURL];
+    backendRequest.HTTPMethod = @"GET";
+    backendRequest.timeoutInterval = 30.0;
+    [backendRequest setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [backendRequest setValue:@"Sonora-iOS/1.0" forHTTPHeaderField:@"User-Agent"];
+
+    __weak typeof(self) weakBackendSelf = self;
+    NSURLSessionDataTask *backendTask = [self.session dataTaskWithRequest:backendRequest
+                                                         completionHandler:^(NSData * _Nullable data,
+                                                                             NSURLResponse * _Nullable response,
+                                                                             NSError * _Nullable error) {
+        __strong typeof(weakBackendSelf) strongBackendSelf = weakBackendSelf;
+        if (strongBackendSelf == nil) {
+            return;
+        }
+
+        if (error != nil) {
+            NSString *message = SonoraTrimmedStringValue(error.localizedDescription);
+            NSString *lowerMessage = message.lowercaseString;
+            if ([lowerMessage containsString:@"unable to resolve host"] ||
+                [lowerMessage containsString:@"no address associated with hostname"] ||
+                [lowerMessage containsString:@"could not resolve host"]) {
+                message = @"Требуется VPN из-за региональных ограничений (451).";
+            }
+            if (message.length == 0) {
+                message = SonoraMiniStreamingInstallUnavailableMessage;
+            }
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(nil, SonoraMiniStreamingError(1204, message));
+            }];
+            return;
+        }
+
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger statusCode = http.statusCode;
+        NSDictionary *json = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:NSDictionary.class]) {
+                json = (NSDictionary *)object;
+            }
+        }
+
+        NSDictionary<NSString *, id> *payload = [strongBackendSelf miniStreamingPayloadFromRapidJSON:(json ?: @{}) trackID:normalizedTrackID];
+        if (statusCode >= 200 && statusCode < 300 && payload != nil) {
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(payload, nil);
+            }];
+            return;
+        }
+
+        NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
+        if (statusCode == 451) {
+            message = @"Требуется VPN из-за региональных ограничений (451).";
+        } else if (message.length == 0 && (statusCode < 200 || statusCode >= 300)) {
+            message = [NSString stringWithFormat:@"RapidAPI request failed (%ld).", (long)statusCode];
+        } else if (message.length == 0 && payload == nil) {
+            message = @"RapidAPI did not return media url.";
+        }
+        if ([strongBackendSelf isRapidQuotaMessage:message]) {
+            message = SonoraMiniStreamingInstallUnavailableMessage;
+        }
+        if (message.length == 0) {
+            message = SonoraMiniStreamingInstallUnavailableMessage;
+        }
+
+        [strongBackendSelf dispatchOnMainQueue:^{
+            completion(nil, SonoraMiniStreamingError(1206, message));
+        }];
+    }];
+    [backendTask resume];
+    return;
+
+    NSString *spotifyTrackURL = [NSString stringWithFormat:@"https://open.spotify.com/track/%@", normalizedTrackID];
+    __weak typeof(self) weakSelf = self;
+    [self fetchBrokerCredentialWithCompletion:^(NSString * _Nullable brokerHost, NSString * _Nullable brokerKey) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        NSArray<NSDictionary<NSString *, NSString *> *> *candidates = [strongSelf rapidResolveCandidatesForTrackURL:spotifyTrackURL
+                                                                                                          brokerHost:brokerHost ?: @""
+                                                                                                           brokerKey:brokerKey ?: @""];
+        if (candidates.count == 0) {
+            [strongSelf dispatchOnMainQueue:^{
+                completion(nil, SonoraMiniStreamingError(1203, @"Ключ с сервера недоступен, попробуйте позже."));
+            }];
+            return;
+        }
+
+        __block NSString *lastMessage = @"";
+        __block BOOL sawDailyQuota = NO;
+        __block void (^attemptCandidateAtIndex)(NSUInteger) = nil;
+        attemptCandidateAtIndex = ^(NSUInteger index) {
+            if (index >= candidates.count) {
+                NSString *finalMessage = sawDailyQuota ? SonoraMiniStreamingInstallUnavailableMessage : lastMessage;
+                if (finalMessage.length == 0) {
+                    finalMessage = SonoraMiniStreamingInstallUnavailableMessage;
+                }
+                [strongSelf dispatchOnMainQueue:^{
+                    completion(nil, SonoraMiniStreamingError(1206, finalMessage));
+                }];
+                return;
+            }
+
+            NSDictionary<NSString *, NSString *> *candidate = candidates[index];
+            NSURL *requestURL = [NSURL URLWithString:SonoraTrimmedStringValue(candidate[@"url"])];
+            NSString *requestHost = SonoraTrimmedStringValue(candidate[@"host"]);
+            NSString *requestKey = SonoraTrimmedStringValue(candidate[@"key"]);
+            if (requestURL == nil || requestHost.length == 0 || requestKey.length == 0) {
+                attemptCandidateAtIndex(index + 1);
+                return;
+            }
+
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL];
+            request.HTTPMethod = @"GET";
+            request.timeoutInterval = 30.0;
+            [request setValue:requestHost forHTTPHeaderField:@"x-rapidapi-host"];
+            [request setValue:requestKey forHTTPHeaderField:@"x-rapidapi-key"];
+
+            NSURLSessionDataTask *task = [strongSelf.session dataTaskWithRequest:request
+                                                                completionHandler:^(NSData * _Nullable data,
+                                                                                    NSURLResponse * _Nullable response,
+                                                                                    NSError * _Nullable error) {
+                if (error != nil) {
+                    NSString *message = SonoraTrimmedStringValue(error.localizedDescription);
+                    NSString *lowerMessage = message.lowercaseString;
+                    if ([lowerMessage containsString:@"unable to resolve host"] ||
+                        [lowerMessage containsString:@"no address associated with hostname"] ||
+                        [lowerMessage containsString:@"could not resolve host"]) {
+                        message = @"Требуется VPN из-за региональных ограничений (451).";
+                    }
+                    if (message.length > 0) {
+                        lastMessage = message;
+                    }
+                    attemptCandidateAtIndex(index + 1);
+                    return;
+                }
+
+                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                NSInteger statusCode = http.statusCode;
+                NSDictionary *json = nil;
+                if (data.length > 0) {
+                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([object isKindOfClass:NSDictionary.class]) {
+                        json = (NSDictionary *)object;
+                    }
+                }
+
+                NSDictionary<NSString *, id> *payload = [strongSelf miniStreamingPayloadFromRapidJSON:json trackID:normalizedTrackID];
+                if (statusCode >= 200 && statusCode < 300 && payload != nil) {
+                    [strongSelf dispatchOnMainQueue:^{
+                        completion(payload, nil);
+                    }];
+                    return;
+                }
+
+                NSString *message = SonoraTrimmedStringValue(json[@"message"]);
+                if (message.length == 0) {
+                    message = SonoraTrimmedStringValue(json[@"error"]);
+                }
+                if (statusCode == 451) {
+                    message = @"Требуется VPN из-за региональных ограничений (451).";
+                } else if (message.length == 0 && (statusCode < 200 || statusCode >= 300)) {
+                    message = [NSString stringWithFormat:@"RapidAPI request failed (%ld).", (long)statusCode];
+                } else if (message.length == 0 && payload == nil) {
+                    message = @"RapidAPI did not return media url.";
+                }
+                if (message.length > 0) {
+                    lastMessage = message;
+                    if ([strongSelf isRapidQuotaMessage:message]) {
+                        sawDailyQuota = YES;
+                        [strongSelf markRapidAPIKeyBlockedForQuotaIfNeeded:requestKey];
+                    }
+                }
+                attemptCandidateAtIndex(index + 1);
+            }];
+            [task resume];
+        };
+
+        attemptCandidateAtIndex(0);
+    }];
+}
+
+@end
+
+typedef void (^SonoraMiniStreamingInstallHandler)(SonoraMiniStreamingTrack *track,
+                                                  NSArray<SonoraMiniStreamingTrack *> *queue,
+                                                  NSInteger startIndex,
+                                                  UIImage * _Nullable artwork);
+
+@interface SonoraMiniStreamingArtistViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+
+- (instancetype)initWithArtist:(SonoraMiniStreamingArtist *)artist
+                        client:(SonoraMiniStreamingClient *)client
+                installHandler:(SonoraMiniStreamingInstallHandler)installHandler;
+
+@end
+
+@interface SonoraMiniStreamingArtistViewController ()
+
+@property (nonatomic, strong) SonoraMiniStreamingArtist *artist;
+@property (nonatomic, strong) SonoraMiniStreamingClient *client;
+@property (nonatomic, copy) SonoraMiniStreamingInstallHandler installHandler;
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, copy) NSArray<SonoraMiniStreamingTrack *> *tracks;
+@property (nonatomic, strong) NSCache<NSString *, UIImage *> *artworkCache;
+@property (nonatomic, strong) NSMutableSet<NSString *> *loadingArtworkURLs;
+@property (nonatomic, strong) UIImageView *coverView;
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UIButton *playButton;
+@property (nonatomic, strong) UIButton *shuffleButton;
+@property (nonatomic, strong) UIButton *sleepButton;
+@property (nonatomic, assign) BOOL compactTitleVisible;
+
+@end
+
+@implementation SonoraMiniStreamingArtistViewController
+
+- (instancetype)initWithArtist:(SonoraMiniStreamingArtist *)artist
+                        client:(SonoraMiniStreamingClient *)client
+                installHandler:(SonoraMiniStreamingInstallHandler)installHandler {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _artist = artist;
+        _client = client;
+        _installHandler = [installHandler copy];
+        _tracks = @[];
+        _artworkCache = [[NSCache alloc] init];
+        _artworkCache.countLimit = 64;
+        _artworkCache.totalCostLimit = 48 * 1024 * 1024;
+        _loadingArtworkURLs = [NSMutableSet set];
+    }
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.navigationItem.title = nil;
+    self.navigationItem.rightBarButtonItem = nil;
+    self.compactTitleVisible = NO;
+
+    [self setupTableView];
+    self.tableView.tableHeaderView = [self headerViewForWidth:self.view.bounds.size.width];
+    [self updateHeader];
+    [self updatePlayButtonState];
+    [self updateSleepButton];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(handlePlaybackChanged)
+                                               name:SonoraPlaybackStateDidChangeNotification
+                                             object:nil];
+
+    __weak typeof(self) weakSelf = self;
+    [self.client fetchTopTracksForArtistID:self.artist.artistID
+                                     limit:0
+                                completion:^(NSArray<SonoraMiniStreamingTrack *> *tracks, NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        (void)error;
+        strongSelf.tracks = tracks ?: @[];
+        NSUInteger prefetchCount = MIN((NSUInteger)strongSelf.tracks.count, (NSUInteger)12);
+        for (NSUInteger index = 0; index < prefetchCount; index += 1) {
+            [strongSelf loadArtworkIfNeededForTrack:strongSelf.tracks[index]];
+        }
+        [strongSelf.tableView reloadData];
+        [strongSelf updateEmptyState];
+        [strongSelf updatePlayButtonState];
+        [strongSelf updateSleepButton];
+        [strongSelf updateNavigationTitleVisibility];
+    }];
+}
+
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat width = self.view.bounds.size.width;
+    if (fabs(self.tableView.tableHeaderView.bounds.size.width - width) > 1.0) {
+        self.tableView.tableHeaderView = [self headerViewForWidth:width];
+        [self updateHeader];
+        [self updatePlayButtonState];
+        [self updateSleepButton];
+    }
+    [self updateNavigationTitleVisibility];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self handlePlaybackChanged];
+}
+
+- (void)setupTableView {
+    UITableView *tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    tableView.translatesAutoresizingMaskIntoConstraints = NO;
+    tableView.dataSource = self;
+    tableView.delegate = self;
+    tableView.rowHeight = 54.0;
+    tableView.alwaysBounceVertical = YES;
+    tableView.sectionHeaderHeight = 0.0;
+    tableView.sectionFooterHeight = 0.0;
+    tableView.separatorStyle = UITableViewCellSeparatorStyleSingleLine;
+    if (@available(iOS 15.0, *)) {
+        tableView.sectionHeaderTopPadding = 0.0;
+    }
+    [tableView registerClass:SonoraTrackCell.class forCellReuseIdentifier:@"MiniStreamingArtistTrackCell"];
+    self.tableView = tableView;
+    [self.view addSubview:tableView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [tableView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+    ]];
+}
+
+- (UIView *)headerViewForWidth:(CGFloat)width {
+    CGFloat totalWidth = MAX(width, 320.0);
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, totalWidth, 374.0)];
+
+    UIImageView *coverView = [[UIImageView alloc] initWithFrame:CGRectMake((totalWidth - 212.0) * 0.5, 16.0, 212.0, 212.0)];
+    coverView.layer.cornerRadius = 16.0;
+    coverView.layer.masksToBounds = YES;
+    coverView.contentMode = UIViewContentModeScaleAspectFill;
+    self.coverView = coverView;
+
+    UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 236.0, totalWidth - 28.0, 32.0)];
+    nameLabel.textAlignment = NSTextAlignmentCenter;
+    nameLabel.font = SonoraHeadlineFont(28.0);
+    nameLabel.textColor = UIColor.labelColor;
+    self.nameLabel = nameLabel;
+
+    CGFloat playSize = 66.0;
+    CGFloat sideControlSize = 46.0;
+    CGFloat controlsY = 272.0;
+    UIButton *playButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    playButton.frame = CGRectMake((totalWidth - playSize) * 0.5, controlsY, playSize, playSize);
+    playButton.backgroundColor = SonoraAccentYellowColor();
+    playButton.tintColor = UIColor.whiteColor;
+    playButton.layer.cornerRadius = playSize * 0.5;
+    playButton.layer.masksToBounds = YES;
+    UIImageSymbolConfiguration *playConfig = [UIImageSymbolConfiguration configurationWithPointSize:29.0
+                                                                                               weight:UIImageSymbolWeightSemibold];
+    [playButton setImage:[UIImage systemImageNamed:@"play.fill" withConfiguration:playConfig] forState:UIControlStateNormal];
+    [playButton addTarget:self action:@selector(playTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.playButton = playButton;
+
+    UIButton *sleepButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    sleepButton.frame = CGRectMake(CGRectGetMinX(playButton.frame) - 16.0 - sideControlSize,
+                                   controlsY + (playSize - sideControlSize) * 0.5,
+                                   sideControlSize,
+                                   sideControlSize);
+    UIImageSymbolConfiguration *sleepConfig = [UIImageSymbolConfiguration configurationWithPointSize:22.0
+                                                                                               weight:UIImageSymbolWeightSemibold];
+    [sleepButton setImage:[UIImage systemImageNamed:@"moon.zzz" withConfiguration:sleepConfig] forState:UIControlStateNormal];
+    sleepButton.tintColor = SonoraPlayerPrimaryColor();
+    sleepButton.backgroundColor = UIColor.clearColor;
+    [sleepButton addTarget:self action:@selector(sleepTimerTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.sleepButton = sleepButton;
+
+    UIButton *shuffleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    shuffleButton.frame = CGRectMake(CGRectGetMaxX(playButton.frame) + 16.0,
+                                     controlsY + (playSize - sideControlSize) * 0.5,
+                                     sideControlSize,
+                                     sideControlSize);
+    UIImageSymbolConfiguration *shuffleConfig = [UIImageSymbolConfiguration configurationWithPointSize:22.0
+                                                                                                 weight:UIImageSymbolWeightSemibold];
+    [shuffleButton setImage:[UIImage systemImageNamed:@"shuffle" withConfiguration:shuffleConfig] forState:UIControlStateNormal];
+    shuffleButton.tintColor = SonoraPlayerPrimaryColor();
+    shuffleButton.backgroundColor = UIColor.clearColor;
+    [shuffleButton addTarget:self action:@selector(shuffleTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.shuffleButton = shuffleButton;
+
+    [header addSubview:coverView];
+    [header addSubview:nameLabel];
+    [header addSubview:sleepButton];
+    [header addSubview:playButton];
+    [header addSubview:shuffleButton];
+
+    return header;
+}
+
+- (void)updateHeader {
+    NSString *artistName = self.artist.name.length > 0 ? self.artist.name : @"Artist";
+    self.nameLabel.text = artistName;
+
+    UIImage *coverImage = [self cachedArtworkForURL:self.artist.artworkURL];
+    if (coverImage != nil) {
+        self.coverView.image = coverImage;
+        self.coverView.contentMode = UIViewContentModeScaleAspectFill;
+        self.coverView.tintColor = nil;
+        self.coverView.backgroundColor = UIColor.clearColor;
+    } else {
+        self.coverView.image = [UIImage systemImageNamed:@"person.fill"];
+        self.coverView.contentMode = UIViewContentModeCenter;
+        self.coverView.tintColor = UIColor.secondaryLabelColor;
+        self.coverView.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+            if (trait.userInterfaceStyle == UIUserInterfaceStyleDark) {
+                return [UIColor colorWithWhite:1.0 alpha:0.08];
+            }
+            return [UIColor colorWithWhite:0.0 alpha:0.04];
+        }];
+        [self loadArtworkIfNeededForURL:self.artist.artworkURL];
+    }
+}
+
+- (void)updatePlayButtonState {
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    SonoraTrack *currentTrack = playback.currentTrack;
+    BOOL hasTracks = (self.tracks.count > 0);
+    BOOL playingArtistTrack = NO;
+    for (SonoraMiniStreamingTrack *track in self.tracks) {
+        if ([self isPlaybackTrack:currentTrack matchingMiniTrack:track]) {
+            playingArtistTrack = YES;
+            break;
+        }
+    }
+
+    self.playButton.enabled = hasTracks;
+    self.playButton.alpha = hasTracks ? 1.0 : 0.45;
+    NSString *symbolName = (playingArtistTrack && playback.isPlaying) ? @"pause.fill" : @"play.fill";
+    UIImageSymbolConfiguration *playConfig = [UIImageSymbolConfiguration configurationWithPointSize:29.0
+                                                                                              weight:UIImageSymbolWeightSemibold];
+    [self.playButton setImage:[UIImage systemImageNamed:symbolName withConfiguration:playConfig] forState:UIControlStateNormal];
+}
+
+- (void)updateNavigationTitleVisibility {
+    NSString *artistName = self.artist.name.length > 0 ? self.artist.name : @"Artist";
+    BOOL shouldShowCompact = (self.tableView.contentOffset.y > 170.0);
+    if (shouldShowCompact == self.compactTitleVisible) {
+        return;
+    }
+    self.compactTitleVisible = shouldShowCompact;
+    if (shouldShowCompact) {
+        self.navigationItem.title = artistName;
+    } else {
+        self.navigationItem.title = nil;
+    }
+}
+
+- (void)updateEmptyState {
+    if (self.tracks.count > 0) {
+        self.tableView.backgroundView = nil;
+        return;
+    }
+
+    UILabel *label = [[UILabel alloc] init];
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = UIColor.secondaryLabelColor;
+    label.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium];
+    label.text = @"No tracks found for this artist.";
+    self.tableView.backgroundView = label;
+}
+
+- (nullable UIImage *)cachedArtworkForURL:(NSString *)urlString {
+    if (urlString.length == 0) {
+        return nil;
+    }
+    return [self.artworkCache objectForKey:urlString];
+}
+
+- (nullable UIImage *)cachedArtworkForTrack:(SonoraMiniStreamingTrack *)track {
+    return [self cachedArtworkForURL:track.artworkURL];
+}
+
+- (void)loadArtworkIfNeededForURL:(NSString *)urlString {
+    if (urlString.length == 0 ||
+        [self.artworkCache objectForKey:urlString] != nil ||
+        [self.loadingArtworkURLs containsObject:urlString]) {
+        return;
+    }
+
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (url == nil) {
+        return;
+    }
+
+    [self.loadingArtworkURLs addObject:urlString];
+    __weak typeof(self) weakSelf = self;
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithURL:url
+                                                            completionHandler:^(NSData * _Nullable data,
+                                                                                NSURLResponse * _Nullable response,
+                                                                                NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        UIImage *image = nil;
+        if (error == nil && data.length > 0) {
+            image = [UIImage imageWithData:data];
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [strongSelf.loadingArtworkURLs removeObject:urlString];
+            if (image != nil) {
+                [strongSelf.artworkCache setObject:image forKey:urlString];
+                [strongSelf.tableView reloadData];
+                [strongSelf updateHeader];
+            }
+        });
+    }];
+    [task resume];
+}
+
+- (void)loadArtworkIfNeededForTrack:(SonoraMiniStreamingTrack *)track {
+    [self loadArtworkIfNeededForURL:track.artworkURL];
+}
+
+- (SonoraTrack *)displayTrackForMiniTrack:(SonoraMiniStreamingTrack *)miniTrack artwork:(UIImage * _Nullable)artwork {
+    SonoraTrack *track = [[SonoraTrack alloc] init];
+    NSString *trackID = SonoraTrimmedStringValue(miniTrack.trackID);
+    if (trackID.length == 0) {
+        trackID = [NSUUID UUID].UUIDString;
+    }
+    track.identifier = [NSString stringWithFormat:@"mini-streaming-display-%@", trackID];
+    track.title = miniTrack.title.length > 0 ? miniTrack.title : @"Track";
+    track.artist = miniTrack.artists.length > 0 ? miniTrack.artists : @"Spotify";
+    track.fileName = [NSString stringWithFormat:@"%@.placeholder", trackID];
+    track.url = [NSURL fileURLWithPath:@"/dev/null"];
+    track.duration = MAX(miniTrack.duration, 0.0);
+    track.artwork = artwork ?: SonoraMiniStreamingPlaceholderArtwork(track.title, CGSizeMake(320.0, 320.0));
+    return track;
+}
+
+- (void)playTapped {
+    if (self.tracks.count == 0) {
+        SonoraPresentAlert(self, @"No Tracks", @"No tracks found for this artist.");
+        return;
+    }
+
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    BOOL hasCurrentArtistTrack = NO;
+    for (SonoraMiniStreamingTrack *artistTrack in self.tracks) {
+        if ([self isPlaybackTrack:playback.currentTrack matchingMiniTrack:artistTrack]) {
+            hasCurrentArtistTrack = YES;
+            break;
+        }
+    }
+    if (hasCurrentArtistTrack) {
+        [playback togglePlayPause];
+        [self updatePlayButtonState];
+        [self.tableView reloadData];
+        return;
+    }
+
+    SonoraMiniStreamingTrack *track = self.tracks.firstObject;
+    if (track != nil && self.installHandler != nil) {
+        UIImage *artwork = [self cachedArtworkForTrack:track];
+        self.installHandler(track, self.tracks, 0, artwork);
+    }
+}
+
+- (void)shuffleTapped {
+    if (self.tracks.count == 0) {
+        SonoraPresentAlert(self, @"No Tracks", @"No tracks found for this artist.");
+        return;
+    }
+    if (self.installHandler == nil) {
+        return;
+    }
+
+    NSMutableArray<SonoraMiniStreamingTrack *> *shuffledQueue = [self.tracks mutableCopy];
+    for (NSInteger index = shuffledQueue.count - 1; index > 0; index -= 1) {
+        NSInteger randomIndex = arc4random_uniform((u_int32_t)(index + 1));
+        [shuffledQueue exchangeObjectAtIndex:(NSUInteger)index withObjectAtIndex:(NSUInteger)randomIndex];
+    }
+    SonoraMiniStreamingTrack *startTrack = shuffledQueue.firstObject ?: self.tracks.firstObject;
+    if (startTrack == nil) {
+        return;
+    }
+    UIImage *artwork = [self cachedArtworkForTrack:startTrack];
+    self.installHandler(startTrack, [shuffledQueue copy], 0, artwork);
+}
+
+- (void)sleepTimerTapped {
+    __weak typeof(self) weakSelf = self;
+    SonoraPresentSleepTimerActionSheet(self, self.sleepButton, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        [strongSelf updateSleepButton];
+    });
+}
+
+- (void)updateSleepButton {
+    if (self.sleepButton == nil) {
+        return;
+    }
+
+    SonoraSleepTimerManager *sleepTimer = SonoraSleepTimerManager.sharedManager;
+    BOOL isActive = sleepTimer.isActive;
+    NSString *symbol = isActive ? @"moon.zzz.fill" : @"moon.zzz";
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:22.0
+                                                                                          weight:UIImageSymbolWeightSemibold];
+    [self.sleepButton setImage:[UIImage systemImageNamed:symbol withConfiguration:config] forState:UIControlStateNormal];
+    UIColor *inactiveColor = SonoraPlayerPrimaryColor();
+    self.sleepButton.tintColor = isActive ? SonoraAccentYellowColor() : inactiveColor;
+    if (self.shuffleButton != nil) {
+        self.shuffleButton.tintColor = inactiveColor;
+    }
+    self.sleepButton.accessibilityLabel = isActive
+    ? [NSString stringWithFormat:@"Sleep timer active, %@ remaining", SonoraSleepTimerRemainingString(sleepTimer.remainingTime)]
+    : @"Sleep timer";
+}
+
+- (BOOL)isPlaybackTrack:(SonoraTrack * _Nullable)playbackTrack matchingMiniTrack:(SonoraMiniStreamingTrack *)miniTrack {
+    if (playbackTrack == nil || miniTrack.trackID.length == 0) {
+        return NO;
+    }
+
+    NSString *identifier = playbackTrack.identifier ?: @"";
+    if ([identifier hasPrefix:SonoraMiniStreamingPlaceholderPrefix]) {
+        NSString *trackID = [identifier substringFromIndex:SonoraMiniStreamingPlaceholderPrefix.length];
+        return [trackID isEqualToString:miniTrack.trackID];
+    }
+
+    NSString *playbackTitle = SonoraNormalizedSearchText(playbackTrack.title ?: @"");
+    NSString *miniTitle = SonoraNormalizedSearchText(miniTrack.title ?: @"");
+    if (playbackTitle.length == 0 || miniTitle.length == 0 || ![playbackTitle isEqualToString:miniTitle]) {
+        return NO;
+    }
+
+    NSString *playbackArtist = SonoraNormalizedSearchText(playbackTrack.artist ?: @"");
+    NSString *miniArtist = SonoraNormalizedSearchText(miniTrack.artists ?: @"");
+    if (miniArtist.length == 0 || playbackArtist.length == 0) {
+        return YES;
+    }
+    return ([playbackArtist containsString:miniArtist] ||
+            [miniArtist containsString:playbackArtist]);
+}
+
+- (void)handlePlaybackChanged {
+    [self.tableView reloadData];
+    [self updatePlayButtonState];
+    [self updateSleepButton];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return self.tracks.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    SonoraTrackCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MiniStreamingArtistTrackCell" forIndexPath:indexPath];
+    if (indexPath.row >= self.tracks.count) {
+        return cell;
+    }
+
+    SonoraMiniStreamingTrack *track = self.tracks[indexPath.row];
+    UIImage *artwork = [self cachedArtworkForTrack:track];
+    [self loadArtworkIfNeededForTrack:track];
+    SonoraTrack *displayTrack = [self displayTrackForMiniTrack:track artwork:artwork];
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    BOOL isCurrent = [self isPlaybackTrack:playback.currentTrack matchingMiniTrack:track];
+    [cell configureWithTrack:displayTrack
+                   isCurrent:isCurrent
+      showsPlaybackIndicator:(isCurrent && playback.isPlaying)];
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.row < 0 || indexPath.row >= self.tracks.count) {
+        return;
+    }
+    SonoraMiniStreamingTrack *track = self.tracks[indexPath.row];
+    if (self.installHandler != nil) {
+        UIImage *artwork = [self cachedArtworkForTrack:track];
+        self.installHandler(track, self.tracks, indexPath.row, artwork);
+    }
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView == self.tableView) {
+        [self updateNavigationTitleVisibility];
+    }
+}
+
+@end
 
 static UISearchController *SonoraBuildSearchController(id<UISearchResultsUpdating> updater, NSString *placeholder) {
     UISearchController *searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
@@ -777,12 +3133,14 @@ static void SonoraPresentSleepTimerActionSheet(UIViewController *controller,
 #pragma mark - Music
 
 typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
-    SonoraSearchSectionTypePlaylists = 0,
-    SonoraSearchSectionTypeArtists = 1,
-    SonoraSearchSectionTypeTracks = 2,
+    SonoraSearchSectionTypeMiniStreaming = 0,
+    SonoraSearchSectionTypePlaylists = 1,
+    SonoraSearchSectionTypeArtists = 2,
+    SonoraSearchSectionTypeTracks = 3,
 };
 
 static NSString * const SonoraMusicSearchCardCellReuseID = @"SonoraMusicSearchCardCell";
+static NSString * const SonoraMiniStreamingListCellReuseID = @"SonoraMiniStreamingListCell";
 static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHeader";
 
 @interface SonoraMusicSearchCardCell : UICollectionViewCell
@@ -885,6 +3243,164 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
 
 @end
 
+@interface SonoraMiniStreamingListCell : UICollectionViewCell
+
+- (void)configureWithTitle:(NSString *)title
+                  subtitle:(NSString *)subtitle
+               durationText:(NSString *)durationText
+                     image:(UIImage * _Nullable)image
+                  isCurrent:(BOOL)isCurrent
+     showsPlaybackIndicator:(BOOL)showsPlaybackIndicator
+             showsSeparator:(BOOL)showsSeparator;
+
+@end
+
+@interface SonoraMiniStreamingListCell ()
+
+@property (nonatomic, strong) UIImageView *coverView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UILabel *durationLabel;
+@property (nonatomic, strong) UIView *separatorView;
+
+@end
+
+@implementation SonoraMiniStreamingListCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        [self setupUI];
+    }
+    return self;
+}
+
+- (void)setupUI {
+    self.contentView.backgroundColor = UIColor.clearColor;
+    CGFloat separatorHeight = 1.0 / MAX(UIScreen.mainScreen.scale, 1.0);
+
+    UIImageView *coverView = [[UIImageView alloc] init];
+    coverView.translatesAutoresizingMaskIntoConstraints = NO;
+    coverView.contentMode = UIViewContentModeScaleAspectFill;
+    coverView.clipsToBounds = YES;
+    coverView.layer.cornerRadius = 6.0;
+    coverView.layer.masksToBounds = YES;
+    self.coverView = coverView;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.numberOfLines = 1;
+    self.titleLabel = titleLabel;
+
+    UILabel *subtitleLabel = [[UILabel alloc] init];
+    subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitleLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
+    subtitleLabel.textColor = UIColor.secondaryLabelColor;
+    subtitleLabel.numberOfLines = 1;
+    self.subtitleLabel = subtitleLabel;
+
+    UILabel *durationLabel = [[UILabel alloc] init];
+    durationLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    durationLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    durationLabel.textColor = UIColor.secondaryLabelColor;
+    durationLabel.textAlignment = NSTextAlignmentRight;
+    self.durationLabel = durationLabel;
+
+    UIView *separatorView = [[UIView alloc] init];
+    separatorView.translatesAutoresizingMaskIntoConstraints = NO;
+    separatorView.backgroundColor = [UIColor separatorColor];
+    self.separatorView = separatorView;
+
+    [self.contentView addSubview:coverView];
+    [self.contentView addSubview:durationLabel];
+    [self.contentView addSubview:separatorView];
+    UIStackView *textStack = [[UIStackView alloc] initWithArrangedSubviews:@[titleLabel, subtitleLabel]];
+    textStack.translatesAutoresizingMaskIntoConstraints = NO;
+    textStack.axis = UILayoutConstraintAxisVertical;
+    textStack.alignment = UIStackViewAlignmentFill;
+    textStack.distribution = UIStackViewDistributionFill;
+    textStack.spacing = 2.0;
+    [self.contentView addSubview:textStack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [coverView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:18.0],
+        [coverView.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+        [coverView.widthAnchor constraintEqualToConstant:34.0],
+        [coverView.heightAnchor constraintEqualToConstant:34.0],
+
+        [durationLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-18.0],
+        [durationLabel.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+        [durationLabel.widthAnchor constraintGreaterThanOrEqualToConstant:44.0],
+
+        [textStack.leadingAnchor constraintEqualToAnchor:coverView.trailingAnchor constant:10.0],
+        [textStack.trailingAnchor constraintEqualToAnchor:durationLabel.leadingAnchor constant:-8.0],
+        [textStack.centerYAnchor constraintEqualToAnchor:coverView.centerYAnchor],
+
+        [separatorView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:62.0],
+        [separatorView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+        [separatorView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+        [separatorView.heightAnchor constraintEqualToConstant:separatorHeight]
+    ]];
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.coverView.image = nil;
+    self.coverView.contentMode = UIViewContentModeScaleAspectFill;
+    self.coverView.tintColor = nil;
+    self.coverView.backgroundColor = UIColor.clearColor;
+    self.titleLabel.text = nil;
+    self.subtitleLabel.text = nil;
+    self.durationLabel.text = nil;
+    self.separatorView.hidden = NO;
+    self.titleLabel.textColor = UIColor.labelColor;
+}
+
+- (void)configureWithTitle:(NSString *)title
+                  subtitle:(NSString *)subtitle
+               durationText:(NSString *)durationText
+                     image:(UIImage * _Nullable)image
+                  isCurrent:(BOOL)isCurrent
+     showsPlaybackIndicator:(BOOL)showsPlaybackIndicator
+             showsSeparator:(BOOL)showsSeparator {
+    self.titleLabel.text = title ?: @"";
+    self.subtitleLabel.text = subtitle ?: @"";
+    self.durationLabel.text = durationText ?: @"";
+    self.subtitleLabel.hidden = (subtitle.length == 0);
+    self.separatorView.hidden = !showsSeparator;
+    self.titleLabel.textColor = isCurrent ? SonoraAccentYellowColor() : UIColor.labelColor;
+
+    if (showsPlaybackIndicator && isCurrent) {
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17.0
+                                                                                               weight:UIImageSymbolWeightSemibold];
+        self.coverView.image = [UIImage systemImageNamed:@"pause.fill" withConfiguration:config];
+        self.coverView.tintColor = UIColor.labelColor;
+        self.coverView.backgroundColor = UIColor.clearColor;
+        self.coverView.contentMode = UIViewContentModeCenter;
+        return;
+    }
+
+    if (image != nil) {
+        self.coverView.contentMode = UIViewContentModeScaleAspectFill;
+        self.coverView.image = image;
+        return;
+    }
+
+    self.coverView.contentMode = UIViewContentModeCenter;
+    self.coverView.image = [UIImage systemImageNamed:@"music.note"];
+    self.coverView.tintColor = UIColor.secondaryLabelColor;
+    self.coverView.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+        if (trait.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.08];
+        }
+        return [UIColor colorWithWhite:0.0 alpha:0.04];
+    }];
+}
+
+@end
+
 @interface SonoraMusicSearchHeaderView : UICollectionReusableView
 
 - (void)configureWithTitle:(NSString *)title;
@@ -922,21 +3438,38 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
 
 @end
 
-@interface SonoraMusicViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating, UICollectionViewDataSource, UICollectionViewDelegate>
+@interface SonoraMusicViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating, UICollectionViewDataSource, UICollectionViewDelegate, UIDocumentPickerDelegate>
 
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UICollectionView *searchCollectionView;
+@property (nonatomic, strong) SonoraMiniStreamingClient *miniStreamingClient;
 @property (nonatomic, copy) NSArray<SonoraTrack *> *tracks;
 @property (nonatomic, copy) NSArray<SonoraTrack *> *filteredTracks;
 @property (nonatomic, copy) NSArray<SonoraPlaylist *> *playlists;
 @property (nonatomic, copy) NSArray<SonoraPlaylist *> *filteredPlaylists;
 @property (nonatomic, copy) NSArray<NSDictionary<NSString *, id> *> *artistResults;
+@property (nonatomic, copy) NSArray<SonoraMiniStreamingTrack *> *miniStreamingTracks;
+@property (nonatomic, copy) NSArray<SonoraMiniStreamingArtist *> *miniStreamingArtists;
 @property (nonatomic, copy) NSArray<NSNumber *> *visibleSections;
 @property (nonatomic, copy) NSString *searchQuery;
 @property (nonatomic, strong) UISearchController *searchController;
+@property (nonatomic, strong) NSCache<NSString *, UIImage *> *miniStreamingArtworkCache;
+@property (nonatomic, strong) NSMutableSet<NSString *> *miniStreamingArtworkLoadingURLs;
+@property (nonatomic, strong) NSMutableSet<NSString *> *miniStreamingInstallingTrackIDs;
+@property (nonatomic, copy) NSArray<SonoraMiniStreamingTrack *> *miniStreamingPlaybackQueue;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary<NSString *, id> *> *miniStreamingResolvedPayloadByTrackID;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, SonoraTrack *> *miniStreamingInstalledTracksByTrackID;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *miniStreamingInstalledPathsByTrackID;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionDownloadTask *> *miniStreamingDownloadTasksByTrackID;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *miniStreamingResolveRetryAfterByTrackID;
+@property (nonatomic, copy, nullable) NSString *miniStreamingActiveTrackID;
+@property (nonatomic, copy, nullable) NSString *miniStreamingCurrentPlaybackTrackID;
+@property (nonatomic, strong) UITapGestureRecognizer *searchKeyboardDismissTapRecognizer;
 @property (nonatomic, assign) BOOL searchControllerAttached;
 @property (nonatomic, assign) BOOL musicOnlyMode;
 @property (nonatomic, assign) BOOL multiSelectMode;
+@property (nonatomic, assign) NSUInteger miniStreamingQueryToken;
+@property (nonatomic, copy, nullable) dispatch_block_t miniStreamingSearchDebounceWorkItem;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *selectedTrackIDs;
 @property (nonatomic, strong) UILongPressGestureRecognizer *selectionLongPressRecognizer;
 
@@ -970,6 +3503,24 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     [self updatePresentationMode];
     self.multiSelectMode = NO;
     self.selectedTrackIDs = [NSMutableOrderedSet orderedSet];
+    self.miniStreamingClient = [[SonoraMiniStreamingClient alloc] init];
+    self.miniStreamingTracks = @[];
+    self.miniStreamingArtists = @[];
+    self.miniStreamingArtworkCache = [[NSCache alloc] init];
+    self.miniStreamingArtworkCache.countLimit = 128;
+    self.miniStreamingArtworkCache.totalCostLimit = 96 * 1024 * 1024;
+    self.miniStreamingArtworkLoadingURLs = [NSMutableSet set];
+    self.miniStreamingInstallingTrackIDs = [NSMutableSet set];
+    self.miniStreamingResolvedPayloadByTrackID = [NSMutableDictionary dictionary];
+    self.miniStreamingPlaybackQueue = @[];
+    self.miniStreamingInstalledTracksByTrackID = [NSMutableDictionary dictionary];
+    self.miniStreamingInstalledPathsByTrackID = [NSMutableDictionary dictionary];
+    self.miniStreamingDownloadTasksByTrackID = [NSMutableDictionary dictionary];
+    self.miniStreamingResolveRetryAfterByTrackID = [NSMutableDictionary dictionary];
+    self.miniStreamingActiveTrackID = nil;
+    self.miniStreamingCurrentPlaybackTrackID = nil;
+    self.miniStreamingQueryToken = 0;
+    [self loadMiniStreamingInstalledTrackMappingsFromDefaults];
 
     [self refreshNavigationItemsForMusicSelectionState];
 
@@ -1050,13 +3601,19 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     collectionView.translatesAutoresizingMaskIntoConstraints = NO;
     collectionView.backgroundColor = UIColor.systemBackgroundColor;
     collectionView.alwaysBounceVertical = YES;
+    collectionView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     collectionView.dataSource = self;
     collectionView.delegate = self;
 
     [collectionView registerClass:SonoraMusicSearchCardCell.class forCellWithReuseIdentifier:SonoraMusicSearchCardCellReuseID];
+    [collectionView registerClass:SonoraMiniStreamingListCell.class forCellWithReuseIdentifier:SonoraMiniStreamingListCellReuseID];
     [collectionView registerClass:SonoraMusicSearchHeaderView.class
        forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
               withReuseIdentifier:SonoraMusicSearchHeaderReuseID];
+    UITapGestureRecognizer *dismissTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSearchBackgroundTap)];
+    dismissTap.cancelsTouchesInView = NO;
+    [collectionView addGestureRecognizer:dismissTap];
+    self.searchKeyboardDismissTapRecognizer = dismissTap;
 
     self.searchCollectionView = collectionView;
     [self.view addSubview:collectionView];
@@ -1082,23 +3639,45 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
         if (strongSelf == nil) {
             return nil;
         }
-        return [strongSelf searchSectionLayout];
+        SonoraSearchSectionType sectionType = [strongSelf sectionTypeForIndex:sectionIndex];
+        return [strongSelf searchSectionLayoutForSectionType:sectionType];
     }];
 }
 
-- (NSCollectionLayoutSection *)searchSectionLayout {
-    NSCollectionLayoutSize *itemSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension absoluteDimension:184.0]
-                                                                       heightDimension:[NSCollectionLayoutDimension absoluteDimension:246.0]];
+- (NSCollectionLayoutSection *)searchSectionLayoutForSectionType:(SonoraSearchSectionType)sectionType {
+    BOOL isSpotifyListSection = (sectionType == SonoraSearchSectionTypeMiniStreaming);
+    NSCollectionLayoutSize *itemSize = nil;
+    NSCollectionLayoutSize *groupSize = nil;
+    CGFloat interGroupSpacing = 0.0;
+    NSDirectionalEdgeInsets sectionInsets = NSDirectionalEdgeInsetsZero;
+    UICollectionLayoutSectionOrthogonalScrollingBehavior scrolling = UICollectionLayoutSectionOrthogonalScrollingBehaviorNone;
+
+    if (isSpotifyListSection) {
+        itemSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension fractionalWidthDimension:1.0]
+                                                  heightDimension:[NSCollectionLayoutDimension absoluteDimension:54.0]];
+        groupSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension fractionalWidthDimension:1.0]
+                                                   heightDimension:[NSCollectionLayoutDimension absoluteDimension:54.0]];
+        interGroupSpacing = 0.0;
+        sectionInsets = NSDirectionalEdgeInsetsMake(8.0, 0.0, 12.0, 0.0);
+        scrolling = UICollectionLayoutSectionOrthogonalScrollingBehaviorNone;
+    } else {
+        itemSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension absoluteDimension:184.0]
+                                                  heightDimension:[NSCollectionLayoutDimension absoluteDimension:246.0]];
+        groupSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension absoluteDimension:184.0]
+                                                   heightDimension:[NSCollectionLayoutDimension absoluteDimension:246.0]];
+        interGroupSpacing = 12.0;
+        sectionInsets = NSDirectionalEdgeInsetsMake(10.0, 18.0, 12.0, 18.0);
+        scrolling = UICollectionLayoutSectionOrthogonalScrollingBehaviorContinuousGroupLeadingBoundary;
+    }
+
     NSCollectionLayoutItem *item = [NSCollectionLayoutItem itemWithLayoutSize:itemSize];
 
-    NSCollectionLayoutSize *groupSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension absoluteDimension:184.0]
-                                                                        heightDimension:[NSCollectionLayoutDimension absoluteDimension:246.0]];
     NSCollectionLayoutGroup *group = [NSCollectionLayoutGroup horizontalGroupWithLayoutSize:groupSize subitems:@[item]];
 
     NSCollectionLayoutSection *section = [NSCollectionLayoutSection sectionWithGroup:group];
-    section.interGroupSpacing = 12.0;
-    section.contentInsets = NSDirectionalEdgeInsetsMake(10.0, 18.0, 12.0, 18.0);
-    section.orthogonalScrollingBehavior = UICollectionLayoutSectionOrthogonalScrollingBehaviorContinuousGroupLeadingBoundary;
+    section.interGroupSpacing = interGroupSpacing;
+    section.contentInsets = sectionInsets;
+    section.orthogonalScrollingBehavior = scrolling;
 
     NSCollectionLayoutSize *headerSize = [NSCollectionLayoutSize sizeWithWidthDimension:[NSCollectionLayoutDimension fractionalWidthDimension:1.0]
                                                                          heightDimension:[NSCollectionLayoutDimension estimatedDimension:36.0]];
@@ -1106,13 +3685,14 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
                                                            boundarySupplementaryItemWithLayoutSize:headerSize
                                                            elementKind:UICollectionElementKindSectionHeader
                                                            alignment:NSRectAlignmentTop];
-    header.contentInsets = NSDirectionalEdgeInsetsMake(0.0, 10.0, 0.0, 18.0);
+    header.contentInsets = NSDirectionalEdgeInsetsMake(0.0, 18.0, 0.0, 18.0);
     section.boundarySupplementaryItems = @[header];
     return section;
 }
 
 - (void)setupSearch {
-    self.searchController = SonoraBuildSearchController(self, @"Search");
+    NSString *placeholder = self.musicOnlyMode ? @"Search Music" : @"Search Spotify";
+    self.searchController = SonoraBuildSearchController(self, placeholder);
     self.definesPresentationContext = YES;
     if (self.musicOnlyMode) {
         self.navigationItem.searchController = nil;
@@ -1162,6 +3742,8 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
         self.filteredTracks = SonoraFilterTracksByQuery(self.tracks, self.searchQuery);
         self.filteredPlaylists = @[];
         self.artistResults = @[];
+        self.miniStreamingTracks = @[];
+        self.miniStreamingArtists = @[];
     } else {
         NSArray<SonoraTrack *> *queryTracks = SonoraFilterTracksByQuery(self.tracks, self.searchQuery);
         if (normalizedQuery.length == 0) {
@@ -1178,18 +3760,21 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
         if (self.filteredPlaylists.count > 10) {
             self.filteredPlaylists = [self.filteredPlaylists subarrayWithRange:NSMakeRange(0, 10)];
         }
-        self.artistResults = SonoraBuildArtistSearchResults(self.tracks, self.searchQuery, 12);
+        self.artistResults = @[];
     }
 
     NSMutableArray<NSNumber *> *sections = [NSMutableArray array];
     if (self.musicOnlyMode) {
         [sections addObject:@(SonoraSearchSectionTypeTracks)];
     } else {
+        if (self.miniStreamingTracks.count > 0) {
+            [sections addObject:@(SonoraSearchSectionTypeMiniStreaming)];
+        }
+        if (self.miniStreamingArtists.count > 0) {
+            [sections addObject:@(SonoraSearchSectionTypeArtists)];
+        }
         if (self.filteredPlaylists.count > 0) {
             [sections addObject:@(SonoraSearchSectionTypePlaylists)];
-        }
-        if (self.artistResults.count > 0) {
-            [sections addObject:@(SonoraSearchSectionTypeArtists)];
         }
         if (self.filteredTracks.count > 0) {
             [sections addObject:@(SonoraSearchSectionTypeTracks)];
@@ -1205,7 +3790,8 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
 - (void)updateEmptyState {
     BOOL hasAnyResult = (self.filteredTracks.count > 0 ||
                          self.filteredPlaylists.count > 0 ||
-                         self.artistResults.count > 0);
+                         self.miniStreamingTracks.count > 0 ||
+                         self.miniStreamingArtists.count > 0);
     if (hasAnyResult) {
         self.tableView.backgroundView = nil;
         self.searchCollectionView.backgroundView = nil;
@@ -1217,23 +3803,193 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     label.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium];
     label.textAlignment = NSTextAlignmentCenter;
     label.numberOfLines = 0;
-
-    if (self.tracks.count == 0) {
-        label.text = @"No music files in On My iPhone/Sonora/Sonora";
-    } else {
-        label.text = @"No search results.";
-    }
     if (self.musicOnlyMode) {
+        if (self.tracks.count == 0) {
+            label.text = @"No music files in On My iPhone/Sonora/Sonora";
+        } else {
+            label.text = @"No search results.";
+        }
         self.tableView.backgroundView = label;
         self.searchCollectionView.backgroundView = nil;
     } else {
+        NSString *normalizedQuery = SonoraNormalizedSearchText(self.searchQuery);
+        if (normalizedQuery.length == 0) {
+            label.text = @"Use Search above to find Spotify tracks and artists.";
+        } else {
+            label.text = @"No search results.";
+        }
         self.searchCollectionView.backgroundView = label;
         self.tableView.backgroundView = nil;
     }
 }
 
+- (void)loadMiniStreamingInstalledTrackMappingsFromDefaults {
+    [self.miniStreamingInstalledPathsByTrackID removeAllObjects];
+    NSDictionary *stored = [NSUserDefaults.standardUserDefaults dictionaryForKey:SonoraMiniStreamingInstalledTrackMapDefaultsKey];
+    if (![stored isKindOfClass:NSDictionary.class]) {
+        return;
+    }
+    [stored enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull rawTrackID, id  _Nonnull rawPath, __unused BOOL * _Nonnull stop) {
+        if (![rawTrackID isKindOfClass:NSString.class] || ![rawPath isKindOfClass:NSString.class]) {
+            return;
+        }
+        NSString *trackID = SonoraTrimmedStringValue((NSString *)rawTrackID);
+        NSString *path = SonoraTrimmedStringValue((NSString *)rawPath);
+        if (trackID.length == 0 || path.length == 0) {
+            return;
+        }
+        self.miniStreamingInstalledPathsByTrackID[trackID] = path;
+    }];
+}
+
+- (void)persistMiniStreamingInstalledTrackMappings {
+    NSDictionary<NSString *, NSString *> *payload = [self.miniStreamingInstalledPathsByTrackID copy] ?: @{};
+    [NSUserDefaults.standardUserDefaults setObject:payload forKey:SonoraMiniStreamingInstalledTrackMapDefaultsKey];
+}
+
+- (void)rememberMiniStreamingInstalledTrack:(SonoraTrack *)installedTrack trackID:(NSString *)trackID {
+    if (installedTrack == nil || trackID.length == 0) {
+        return;
+    }
+    self.miniStreamingInstalledTracksByTrackID[trackID] = installedTrack;
+    if (installedTrack.identifier.length > 0) {
+        self.miniStreamingInstalledPathsByTrackID[trackID] = installedTrack.identifier;
+    } else if (installedTrack.url.path.length > 0) {
+        self.miniStreamingInstalledPathsByTrackID[trackID] = installedTrack.url.path;
+    } else {
+        [self.miniStreamingInstalledPathsByTrackID removeObjectForKey:trackID];
+    }
+    [self persistMiniStreamingInstalledTrackMappings];
+}
+
+- (NSArray<NSString *> *)miniStreamingArtistTokensFromText:(NSString *)artistText {
+    NSString *normalized = SonoraNormalizedSearchText(artistText ?: @"");
+    if (normalized.length == 0) {
+        return @[];
+    }
+    NSCharacterSet *splitSet = [NSCharacterSet characterSetWithCharactersInString:@",/&;|"];
+    NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+    NSArray<NSString *> *parts = [normalized componentsSeparatedByCharactersInSet:splitSet];
+    for (NSString *part in parts) {
+        NSString *token = [part stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (token.length >= 2) {
+            [tokens addObject:token];
+        }
+    }
+    return [tokens copy];
+}
+
+- (nullable SonoraTrack *)installedLibraryTrackMatchingMiniStreamingTrack:(SonoraMiniStreamingTrack *)track {
+    if (track == nil) {
+        return nil;
+    }
+    NSString *targetTitle = SonoraNormalizedSearchText(track.title ?: @"");
+    if (targetTitle.length == 0) {
+        return nil;
+    }
+    NSString *targetArtist = SonoraNormalizedSearchText(track.artists ?: @"");
+    NSArray<NSString *> *artistTokens = [self miniStreamingArtistTokensFromText:track.artists ?: @""];
+    SonoraTrack *titleOnlyFallback = nil;
+    for (SonoraTrack *candidate in self.tracks) {
+        NSString *candidateTitle = SonoraNormalizedSearchText(candidate.title ?: @"");
+        if (candidateTitle.length == 0 || ![candidateTitle isEqualToString:targetTitle]) {
+            continue;
+        }
+        if (targetArtist.length == 0) {
+            return candidate;
+        }
+        NSString *candidateArtist = SonoraNormalizedSearchText(candidate.artist ?: @"");
+        if (candidateArtist.length == 0) {
+            if (titleOnlyFallback == nil) {
+                titleOnlyFallback = candidate;
+            }
+            continue;
+        }
+        if ([candidateArtist containsString:targetArtist] || [targetArtist containsString:candidateArtist]) {
+            return candidate;
+        }
+        for (NSString *token in artistTokens) {
+            if (token.length > 1 && [candidateArtist containsString:token]) {
+                return candidate;
+            }
+        }
+        if (titleOnlyFallback == nil) {
+            titleOnlyFallback = candidate;
+        }
+    }
+    return titleOnlyFallback;
+}
+
+- (void)rehydrateMiniStreamingInstalledTracksFromLibrary {
+    NSMutableDictionary<NSString *, SonoraTrack *> *resolved = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *validPaths = [NSMutableDictionary dictionary];
+
+    for (NSString *trackID in self.miniStreamingInstalledPathsByTrackID) {
+        NSString *path = SonoraTrimmedStringValue(self.miniStreamingInstalledPathsByTrackID[trackID]);
+        if (trackID.length == 0 || path.length == 0) {
+            continue;
+        }
+        SonoraTrack *track = [SonoraLibraryManager.sharedManager trackForIdentifier:path];
+        if (track == nil && [NSFileManager.defaultManager fileExistsAtPath:path]) {
+            track = [self installedTrackForDestinationURL:[NSURL fileURLWithPath:path]];
+        }
+        if (track == nil) {
+            continue;
+        }
+        resolved[trackID] = track;
+        if (track.identifier.length > 0) {
+            validPaths[trackID] = track.identifier;
+        } else if (track.url.path.length > 0) {
+            validPaths[trackID] = track.url.path;
+        }
+    }
+
+    [self.miniStreamingInstalledTracksByTrackID removeAllObjects];
+    [self.miniStreamingInstalledTracksByTrackID addEntriesFromDictionary:resolved];
+
+    NSDictionary<NSString *, NSString *> *currentPaths = [self.miniStreamingInstalledPathsByTrackID copy] ?: @{};
+    if (![currentPaths isEqualToDictionary:validPaths]) {
+        [self.miniStreamingInstalledPathsByTrackID removeAllObjects];
+        [self.miniStreamingInstalledPathsByTrackID addEntriesFromDictionary:validPaths];
+        [self persistMiniStreamingInstalledTrackMappings];
+    }
+}
+
+- (nullable SonoraTrack *)knownInstalledMiniStreamingTrackForTrack:(SonoraMiniStreamingTrack *)track {
+    if (track == nil || track.trackID.length == 0) {
+        return nil;
+    }
+    SonoraTrack *installedTrack = self.miniStreamingInstalledTracksByTrackID[track.trackID];
+    if (installedTrack != nil && installedTrack.url.path.length > 0 &&
+        [NSFileManager.defaultManager fileExistsAtPath:installedTrack.url.path]) {
+        return installedTrack;
+    }
+
+    NSString *savedPath = SonoraTrimmedStringValue(self.miniStreamingInstalledPathsByTrackID[track.trackID]);
+    if (savedPath.length > 0) {
+        SonoraTrack *savedTrack = [SonoraLibraryManager.sharedManager trackForIdentifier:savedPath];
+        if (savedTrack == nil && [NSFileManager.defaultManager fileExistsAtPath:savedPath]) {
+            savedTrack = [self installedTrackForDestinationURL:[NSURL fileURLWithPath:savedPath]];
+        }
+        if (savedTrack != nil) {
+            [self rememberMiniStreamingInstalledTrack:savedTrack trackID:track.trackID];
+            return savedTrack;
+        }
+        [self.miniStreamingInstalledPathsByTrackID removeObjectForKey:track.trackID];
+        [self persistMiniStreamingInstalledTrackMappings];
+    }
+
+    SonoraTrack *matchedTrack = [self installedLibraryTrackMatchingMiniStreamingTrack:track];
+    if (matchedTrack != nil) {
+        [self rememberMiniStreamingInstalledTrack:matchedTrack trackID:track.trackID];
+        return matchedTrack;
+    }
+    return nil;
+}
+
 - (void)reloadTracks {
     self.tracks = [SonoraLibraryManager.sharedManager reloadTracks];
+    [self rehydrateMiniStreamingInstalledTracksFromLibrary];
     [SonoraPlaylistStore.sharedStore reloadPlaylists];
     self.playlists = SonoraPlaylistStore.sharedStore.playlists ?: @[];
     [self applySearchFilterAndReload];
@@ -1246,7 +4002,22 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
 }
 
 - (void)handlePlaybackChanged {
+    NSString *currentMiniTrackID = [self miniStreamingTrackIDFromPlaybackTrack:SonoraPlaybackManager.sharedManager.currentTrack];
+    NSString *previousMiniTrackID = self.miniStreamingCurrentPlaybackTrackID ?: @"";
+    NSString *nextMiniTrackID = currentMiniTrackID ?: @"";
+    if (![previousMiniTrackID isEqualToString:nextMiniTrackID]) {
+        if (self.miniStreamingCurrentPlaybackTrackID.length > 0) {
+            SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"cancel_download_on_track_change previous=%@ next=%@",
+                                                     self.miniStreamingCurrentPlaybackTrackID,
+                                                     nextMiniTrackID]);
+            [self cancelMiniStreamingDownloadTaskForTrackID:self.miniStreamingCurrentPlaybackTrackID];
+        }
+    }
+    self.miniStreamingCurrentPlaybackTrackID = nextMiniTrackID.length > 0 ? nextMiniTrackID : nil;
+
     [self.tableView reloadData];
+    [self.searchCollectionView reloadData];
+    [self ensureCurrentMiniStreamingPlaceholderIsInstalling];
 }
 
 - (void)openPlayer {
@@ -1275,12 +4046,1055 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     });
 }
 
+- (void)handleSearchBackgroundTap {
+    if (self.musicOnlyMode) {
+        return;
+    }
+    [self.searchController.searchBar resignFirstResponder];
+}
+
+- (void)refreshMiniStreamingForCurrentQuery {
+    if (self.musicOnlyMode) {
+        return;
+    }
+
+    if (self.miniStreamingSearchDebounceWorkItem != nil) {
+        dispatch_block_cancel(self.miniStreamingSearchDebounceWorkItem);
+        self.miniStreamingSearchDebounceWorkItem = nil;
+    }
+
+    NSString *querySnapshot = self.searchQuery ?: @"";
+    __weak typeof(self) weakSelf = self;
+    dispatch_block_t workItem = dispatch_block_create(0, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        strongSelf.miniStreamingSearchDebounceWorkItem = nil;
+        [strongSelf refreshMiniStreamingForQuery:querySnapshot];
+    });
+
+    self.miniStreamingSearchDebounceWorkItem = workItem;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * (NSTimeInterval)NSEC_PER_SEC)),
+                   dispatch_get_main_queue(),
+                   workItem);
+}
+
+- (void)refreshMiniStreamingForQuery:(NSString *)query {
+    if (self.musicOnlyMode) {
+        return;
+    }
+
+    self.miniStreamingQueryToken += 1;
+    NSUInteger currentToken = self.miniStreamingQueryToken;
+    NSString *normalizedQuery = SonoraNormalizedSearchText(query);
+
+    if (normalizedQuery.length < 2 || ![self.miniStreamingClient isConfigured]) {
+        if (self.miniStreamingTracks.count > 0 || self.miniStreamingArtists.count > 0) {
+            self.miniStreamingTracks = @[];
+            self.miniStreamingArtists = @[];
+            [self applySearchFilterAndReload];
+        }
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    __block NSArray<SonoraMiniStreamingTrack *> *resolvedTracks = self.miniStreamingTracks ?: @[];
+    __block NSArray<SonoraMiniStreamingArtist *> *resolvedArtists = self.miniStreamingArtists ?: @[];
+    __block BOOL tracksResolved = NO;
+    __block BOOL artistsResolved = NO;
+
+    void (^commitIfReady)(void) = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil || strongSelf.miniStreamingQueryToken != currentToken) {
+            return;
+        }
+        if (!tracksResolved || !artistsResolved) {
+            return;
+        }
+        strongSelf.miniStreamingTracks = resolvedTracks ?: @[];
+        strongSelf.miniStreamingArtists = resolvedArtists ?: @[];
+        [strongSelf applySearchFilterAndReload];
+    };
+
+    [self.miniStreamingClient searchTracks:normalizedQuery
+                                     limit:SonoraMiniStreamingSearchLimit
+                                completion:^(NSArray<SonoraMiniStreamingTrack *> *tracks, NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil || strongSelf.miniStreamingQueryToken != currentToken) {
+            return;
+        }
+
+        (void)error;
+        resolvedTracks = tracks ?: @[];
+        tracksResolved = YES;
+        commitIfReady();
+    }];
+
+    [self.miniStreamingClient searchArtists:normalizedQuery
+                                      limit:10
+                                 completion:^(NSArray<SonoraMiniStreamingArtist *> *artists, NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil || strongSelf.miniStreamingQueryToken != currentToken) {
+            return;
+        }
+
+        (void)error;
+        resolvedArtists = artists ?: @[];
+        artistsResolved = YES;
+        commitIfReady();
+    }];
+}
+
+- (nullable UIImage *)cachedMiniStreamingArtworkForURL:(NSString *)urlString {
+    if (urlString.length == 0) {
+        return nil;
+    }
+    return [self.miniStreamingArtworkCache objectForKey:urlString];
+}
+
+- (void)loadMiniStreamingArtworkIfNeededForURL:(NSString *)urlString {
+    if (urlString.length == 0 ||
+        [self.miniStreamingArtworkCache objectForKey:urlString] != nil ||
+        [self.miniStreamingArtworkLoadingURLs containsObject:urlString]) {
+        return;
+    }
+
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (url == nil) {
+        return;
+    }
+
+    [self.miniStreamingArtworkLoadingURLs addObject:urlString];
+    __weak typeof(self) weakSelf = self;
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithURL:url
+                                                            completionHandler:^(NSData * _Nullable data,
+                                                                                NSURLResponse * _Nullable response,
+                                                                                NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        UIImage *image = nil;
+        if (error == nil && data.length > 0) {
+            image = [UIImage imageWithData:data];
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [strongSelf.miniStreamingArtworkLoadingURLs removeObject:urlString];
+            if (image != nil) {
+                [strongSelf.miniStreamingArtworkCache setObject:image forKey:urlString];
+                [strongSelf reloadMiniStreamingRowsForArtworkURL:urlString];
+            }
+        });
+    }];
+    [task resume];
+}
+
+- (nullable UIImage *)cachedMiniStreamingArtworkForTrack:(SonoraMiniStreamingTrack *)track {
+    return [self cachedMiniStreamingArtworkForURL:track.artworkURL];
+}
+
+- (void)loadMiniStreamingArtworkIfNeededForTrack:(SonoraMiniStreamingTrack *)track {
+    [self loadMiniStreamingArtworkIfNeededForURL:track.artworkURL];
+}
+
+- (nullable NSString *)miniStreamingTrackIDFromPlaybackIdentifier:(NSString *)identifier {
+    if (identifier.length == 0) {
+        return nil;
+    }
+    if ([identifier hasPrefix:SonoraMiniStreamingPlaceholderPrefix]) {
+        NSString *trackID = [identifier substringFromIndex:SonoraMiniStreamingPlaceholderPrefix.length];
+        return trackID.length > 0 ? trackID : nil;
+    }
+    return nil;
+}
+
+- (nullable NSString *)miniStreamingTrackIDFromPlaybackTrack:(SonoraTrack * _Nullable)playbackTrack {
+    if (playbackTrack == nil) {
+        return nil;
+    }
+
+    __block NSString *trackIDFromIdentifier = [self miniStreamingTrackIDFromPlaybackIdentifier:playbackTrack.identifier ?: @""];
+    if (trackIDFromIdentifier.length > 0) {
+        return trackIDFromIdentifier;
+    }
+
+    [self.miniStreamingInstalledTracksByTrackID enumerateKeysAndObjectsUsingBlock:^(NSString * _Nonnull trackID,
+                                                                                     SonoraTrack * _Nonnull installedTrack,
+                                                                                     BOOL * _Nonnull stop) {
+        BOOL sameIdentifier = (installedTrack.identifier.length > 0 &&
+                               [installedTrack.identifier isEqualToString:playbackTrack.identifier ?: @""]);
+        BOOL samePath = (installedTrack.url.path.length > 0 &&
+                         [installedTrack.url.path isEqualToString:playbackTrack.url.path ?: @""]);
+        if (sameIdentifier || samePath) {
+            trackIDFromIdentifier = trackID;
+            *stop = YES;
+        }
+    }];
+
+    return trackIDFromIdentifier.length > 0 ? trackIDFromIdentifier : nil;
+}
+
+- (BOOL)isMiniStreamingTrackIdentifierMiniPlaceholder:(NSString *)identifier {
+    if (identifier.length == 0) {
+        return NO;
+    }
+    if (![identifier hasPrefix:SonoraMiniStreamingPlaceholderPrefix]) {
+        return NO;
+    }
+    return YES;
+}
+
+- (BOOL)isMiniStreamingPlaceholderTrack:(SonoraTrack * _Nullable)track {
+    if (![self isMiniStreamingTrackIdentifierMiniPlaceholder:track.identifier ?: @""]) {
+        return NO;
+    }
+
+    NSURL *url = track.url;
+    if (url == nil) {
+        return YES;
+    }
+    if (!url.isFileURL) {
+        return NO;
+    }
+    NSString *path = url.path ?: @"";
+    return path.length == 0 || [path isEqualToString:@"/dev/null"];
+}
+
+- (nullable NSURL *)miniStreamingDownloadURLFromPayload:(NSDictionary<NSString *, id> *)payload {
+    NSString *downloadLink = SonoraTrimmedStringValue(payload[@"downloadLink"]);
+    if (downloadLink.length == 0) {
+        downloadLink = SonoraTrimmedStringValue(payload[@"mediaUrl"]);
+    }
+    if (downloadLink.length == 0) {
+        downloadLink = SonoraTrimmedStringValue(payload[@"link"]);
+    }
+    if (downloadLink.length == 0) {
+        downloadLink = SonoraTrimmedStringValue(payload[@"url"]);
+    }
+    if (downloadLink.length == 0) {
+        return nil;
+    }
+
+    NSURL *url = [NSURL URLWithString:downloadLink];
+    if (url == nil) {
+        NSString *encoded = [downloadLink stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLFragmentAllowedCharacterSet];
+        if (encoded.length > 0) {
+            url = [NSURL URLWithString:encoded];
+        }
+    }
+    if (url == nil) {
+        return nil;
+    }
+    NSString *scheme = SonoraTrimmedStringValue(url.scheme).lowercaseString;
+    if (scheme.length == 0) {
+        return nil;
+    }
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
+        return nil;
+    }
+    return url;
+}
+
+- (BOOL)isUsableMiniStreamingPayload:(NSDictionary<NSString *, id> * _Nullable)payload {
+    return [self miniStreamingDownloadURLFromPayload:payload ?: @{}] != nil;
+}
+
+- (void)playMiniStreamingPlaybackQueueIfCurrentForTrack:(SonoraMiniStreamingTrack *)track {
+    if (track == nil || track.trackID.length == 0) {
+        return;
+    }
+
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    NSString *currentMiniTrackID = [self miniStreamingTrackIDFromPlaybackTrack:playback.currentTrack];
+    BOOL targetIsActiveInstall = [self.miniStreamingActiveTrackID isEqualToString:track.trackID];
+    if (currentMiniTrackID.length > 0 &&
+        ![currentMiniTrackID isEqualToString:track.trackID] &&
+        !targetIsActiveInstall) {
+        return;
+    }
+
+    NSArray<SonoraMiniStreamingTrack *> *normalizedQueue = self.miniStreamingPlaybackQueue;
+    if (normalizedQueue.count == 0) {
+        normalizedQueue = @[];
+    }
+
+    NSMutableArray<SonoraTrack *> *playbackQueue = [NSMutableArray arrayWithCapacity:normalizedQueue.count];
+    NSInteger startIndex = 0;
+    for (NSUInteger index = 0; index < normalizedQueue.count; index += 1) {
+        SonoraMiniStreamingTrack *queueTrack = normalizedQueue[index];
+        if ([queueTrack.trackID isEqualToString:track.trackID]) {
+            startIndex = (NSInteger)index;
+        }
+        [playbackQueue addObject:[self miniStreamingPlaybackTrackForMiniTrack:queueTrack]];
+    }
+
+    if (playbackQueue.count == 0) {
+        [playbackQueue addObject:[self miniStreamingPlaybackTrackForMiniTrack:track]];
+    }
+    [playback setShuffleEnabled:NO];
+    [playback playTracks:playbackQueue startIndex:startIndex];
+    SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"play_queue_switched track=%@ start_index=%ld queue=%lu",
+                                             track.trackID,
+                                             (long)startIndex,
+                                             (unsigned long)playbackQueue.count]);
+}
+
+- (void)cancelMiniStreamingDownloadTaskForTrackID:(NSString *)trackID {
+    if (trackID.length == 0) {
+        return;
+    }
+
+    NSURLSessionDownloadTask *downloadTask = self.miniStreamingDownloadTasksByTrackID[trackID];
+    if (downloadTask != nil) {
+        [downloadTask cancel];
+        [self.miniStreamingDownloadTasksByTrackID removeObjectForKey:trackID];
+        SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"download_cancel track=%@", trackID]);
+    }
+    [self.miniStreamingInstallingTrackIDs removeObject:trackID];
+}
+
+- (nullable SonoraMiniStreamingTrack *)miniStreamingTrackFromPlaybackQueueByTrackID:(NSString *)trackID {
+    if (trackID.length == 0) {
+        return nil;
+    }
+
+    for (SonoraMiniStreamingTrack *track in self.miniStreamingPlaybackQueue) {
+        if ([track.trackID isEqualToString:trackID]) {
+            return track;
+        }
+    }
+    for (SonoraMiniStreamingTrack *track in self.miniStreamingTracks) {
+        if ([track.trackID isEqualToString:trackID]) {
+            return track;
+        }
+    }
+    return nil;
+}
+
+- (SonoraTrack *)miniStreamingPlaceholderPlaybackTrackForTrack:(SonoraMiniStreamingTrack *)track {
+    SonoraTrack *placeholderTrack = [[SonoraTrack alloc] init];
+    placeholderTrack.identifier = [NSString stringWithFormat:@"%@%@", SonoraMiniStreamingPlaceholderPrefix, track.trackID];
+    placeholderTrack.title = track.title.length > 0 ? track.title : @"Loading track...";
+    placeholderTrack.artist = track.artists.length > 0 ? track.artists : @"Spotify";
+    placeholderTrack.fileName = [NSString stringWithFormat:@"%@.placeholder", track.trackID];
+    placeholderTrack.url = [NSURL fileURLWithPath:@"/dev/null"];
+    placeholderTrack.duration = MAX(track.duration, 0.0);
+    UIImage *artwork = [self cachedMiniStreamingArtworkForTrack:track];
+    placeholderTrack.artwork = artwork ?: SonoraMiniStreamingPlaceholderArtwork(placeholderTrack.title, CGSizeMake(640.0, 640.0));
+    return placeholderTrack;
+}
+
+- (SonoraTrack *)miniStreamingPlaybackTrackForMiniTrack:(SonoraMiniStreamingTrack *)miniTrack {
+    SonoraTrack *installedTrack = self.miniStreamingInstalledTracksByTrackID[miniTrack.trackID];
+    if (installedTrack == nil) {
+        installedTrack = [self knownInstalledMiniStreamingTrackForTrack:miniTrack];
+    }
+    if (installedTrack != nil) {
+        return installedTrack;
+    }
+
+    NSDictionary<NSString *, id> *payload = self.miniStreamingResolvedPayloadByTrackID[miniTrack.trackID];
+    if ([self isUsableMiniStreamingPayload:payload]) {
+        NSURL *downloadURL = [self miniStreamingDownloadURLFromPayload:payload];
+        if (downloadURL != nil) {
+            SonoraTrack *streamingTrack = [[SonoraTrack alloc] init];
+            streamingTrack.identifier = [NSString stringWithFormat:@"%@%@", SonoraMiniStreamingPlaceholderPrefix, miniTrack.trackID];
+            streamingTrack.title = miniTrack.title.length > 0 ? miniTrack.title : @"Track";
+            streamingTrack.artist = miniTrack.artists.length > 0 ? miniTrack.artists : @"Spotify";
+            streamingTrack.fileName = [NSString stringWithFormat:@"%@.mp3", miniTrack.trackID];
+            streamingTrack.url = downloadURL;
+            streamingTrack.duration = MAX(miniTrack.duration, 0.0);
+            UIImage *artwork = [self cachedMiniStreamingArtworkForTrack:miniTrack];
+            streamingTrack.artwork = artwork ?: SonoraMiniStreamingPlaceholderArtwork(streamingTrack.title, CGSizeMake(640.0, 640.0));
+            return streamingTrack;
+        }
+    }
+
+    return [self miniStreamingPlaceholderPlaybackTrackForTrack:miniTrack];
+}
+
+- (NSArray<SonoraMiniStreamingTrack *> *)miniStreamingQueueFromContext:(NSArray<SonoraMiniStreamingTrack *> *)queue
+                                                          selectedTrack:(SonoraMiniStreamingTrack *)selectedTrack {
+    NSMutableArray<SonoraMiniStreamingTrack *> *normalized = [NSMutableArray array];
+    for (SonoraMiniStreamingTrack *candidate in queue) {
+        if (![candidate isKindOfClass:SonoraMiniStreamingTrack.class] || candidate.trackID.length == 0) {
+            continue;
+        }
+        [normalized addObject:candidate];
+    }
+
+    if (normalized.count == 0 && selectedTrack != nil && selectedTrack.trackID.length > 0) {
+        [normalized addObject:selectedTrack];
+    }
+    return [normalized copy];
+}
+
+- (BOOL)miniStreamingPlaybackQueueMatchesMiniTracks:(NSArray<SonoraMiniStreamingTrack *> *)miniTracks {
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    NSArray<SonoraTrack *> *queue = playback.currentQueue ?: @[];
+    if (miniTracks.count == 0 || queue.count != miniTracks.count) {
+        return NO;
+    }
+
+    for (NSUInteger index = 0; index < miniTracks.count; index += 1) {
+        SonoraMiniStreamingTrack *expectedTrack = miniTracks[index];
+        SonoraTrack *queueTrack = queue[index];
+        NSString *queueTrackID = [self miniStreamingTrackIDFromPlaybackTrack:queueTrack];
+        if (queueTrackID.length == 0 || ![queueTrackID isEqualToString:expectedTrack.trackID]) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+- (void)ensureCurrentMiniStreamingPlaceholderIsInstalling {
+    if (self.musicOnlyMode) {
+        return;
+    }
+
+    SonoraTrack *currentTrack = SonoraPlaybackManager.sharedManager.currentTrack;
+    if (![self isMiniStreamingPlaceholderTrack:currentTrack]) {
+        return;
+    }
+
+    NSString *trackID = [self miniStreamingTrackIDFromPlaybackIdentifier:currentTrack.identifier ?: @""];
+    if (trackID.length == 0) {
+        return;
+    }
+
+    SonoraMiniStreamingTrack *miniTrack = [self miniStreamingTrackFromPlaybackQueueByTrackID:trackID];
+    if (miniTrack == nil) {
+        return;
+    }
+
+    [self startMiniStreamingInstallIfNeededForTrack:miniTrack showErrorUI:NO];
+}
+
+- (void)reloadMiniStreamingRowsForArtworkURL:(NSString *)artworkURL {
+    if (artworkURL.length == 0) {
+        return;
+    }
+
+    NSMutableArray<NSIndexPath *> *indexPaths = [NSMutableArray array];
+    NSInteger miniTracksSectionIndex = NSNotFound;
+    NSInteger artistsSectionIndex = NSNotFound;
+    for (NSInteger section = 0; section < self.visibleSections.count; section += 1) {
+        SonoraSearchSectionType sectionType = [self sectionTypeForIndex:section];
+        if (sectionType == SonoraSearchSectionTypeMiniStreaming) {
+            miniTracksSectionIndex = section;
+        } else if (sectionType == SonoraSearchSectionTypeArtists) {
+            artistsSectionIndex = section;
+        }
+    }
+
+    if (miniTracksSectionIndex != NSNotFound) {
+        for (NSInteger index = 0; index < self.miniStreamingTracks.count; index += 1) {
+            SonoraMiniStreamingTrack *track = self.miniStreamingTracks[index];
+            if ([track.artworkURL isEqualToString:artworkURL]) {
+                [indexPaths addObject:[NSIndexPath indexPathForItem:index inSection:miniTracksSectionIndex]];
+            }
+        }
+    }
+
+    if (artistsSectionIndex != NSNotFound) {
+        for (NSInteger index = 0; index < self.miniStreamingArtists.count; index += 1) {
+            SonoraMiniStreamingArtist *artist = self.miniStreamingArtists[index];
+            if ([artist.artworkURL isEqualToString:artworkURL]) {
+                [indexPaths addObject:[NSIndexPath indexPathForItem:index inSection:artistsSectionIndex]];
+            }
+        }
+    }
+
+    if (indexPaths.count == 0) {
+        return;
+    }
+    [self.searchCollectionView reloadItemsAtIndexPaths:indexPaths];
+}
+
+- (void)openPlayerIfNeeded {
+    if (self.navigationController == nil) {
+        return;
+    }
+    UIViewController *top = self.navigationController.topViewController;
+    if ([top isKindOfClass:SonoraPlayerViewController.class]) {
+        return;
+    }
+    [self openPlayer];
+}
+
+- (void)prepareMiniStreamingInstallForTrack:(SonoraMiniStreamingTrack *)track
+                                      queue:(NSArray<SonoraMiniStreamingTrack *> *)queue
+                                 startIndex:(NSInteger)startIndex {
+    if (track == nil || track.trackID.length == 0) {
+        return;
+    }
+    self.miniStreamingActiveTrackID = track.trackID;
+
+    NSArray<SonoraMiniStreamingTrack *> *normalizedQueue = [self miniStreamingQueueFromContext:queue selectedTrack:track];
+    self.miniStreamingPlaybackQueue = normalizedQueue;
+    for (SonoraMiniStreamingTrack *queueTrack in normalizedQueue) {
+        [self loadMiniStreamingArtworkIfNeededForTrack:queueTrack];
+    }
+
+    NSMutableArray<SonoraTrack *> *playbackQueue = [NSMutableArray arrayWithCapacity:normalizedQueue.count];
+    for (SonoraMiniStreamingTrack *queueTrack in normalizedQueue) {
+        [playbackQueue addObject:[self miniStreamingPlaybackTrackForMiniTrack:queueTrack]];
+    }
+    if (playbackQueue.count == 0) {
+        [playbackQueue addObject:[self miniStreamingPlaybackTrackForMiniTrack:track]];
+    }
+
+    NSInteger resolvedStartIndex = NSNotFound;
+    if (startIndex >= 0 && startIndex < (NSInteger)normalizedQueue.count) {
+        SonoraMiniStreamingTrack *fromIndexTrack = normalizedQueue[(NSUInteger)startIndex];
+        if ([fromIndexTrack.trackID isEqualToString:track.trackID]) {
+            resolvedStartIndex = startIndex;
+        }
+    }
+    if (resolvedStartIndex == NSNotFound) {
+        for (NSUInteger idx = 0; idx < normalizedQueue.count; idx += 1) {
+            if ([normalizedQueue[idx].trackID isEqualToString:track.trackID]) {
+                resolvedStartIndex = (NSInteger)idx;
+                break;
+            }
+        }
+    }
+    if (resolvedStartIndex == NSNotFound) {
+        resolvedStartIndex = 0;
+    }
+
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    [playback setShuffleEnabled:NO];
+    [playback playTracks:playbackQueue startIndex:resolvedStartIndex];
+}
+
+- (nullable SonoraTrack *)installedTrackForDestinationURL:(NSURL *)destinationURL {
+    if (destinationURL.path.length == 0) {
+        return nil;
+    }
+
+    SonoraTrack *track = [SonoraLibraryManager.sharedManager trackForIdentifier:destinationURL.path];
+    if (track != nil) {
+        return track;
+    }
+
+    for (SonoraTrack *candidate in self.tracks) {
+        if ([candidate.identifier isEqualToString:destinationURL.path]) {
+            return candidate;
+        }
+        if ([candidate.url.path isEqualToString:destinationURL.path]) {
+            return candidate;
+        }
+    }
+    return nil;
+}
+
+- (void)syncMiniStreamingPlaybackWithInstalledTrackAtURL:(NSURL *)destinationURL
+                                                  trackID:(NSString *)trackID {
+    if (destinationURL == nil || trackID.length == 0) {
+        return;
+    }
+
+    SonoraTrack *installedTrack = [self installedTrackForDestinationURL:destinationURL];
+    if (installedTrack == nil) {
+        return;
+    }
+    [self rememberMiniStreamingInstalledTrack:installedTrack trackID:trackID];
+
+    if ([self.miniStreamingActiveTrackID isEqualToString:trackID]) {
+        self.miniStreamingActiveTrackID = nil;
+    }
+
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    SonoraTrack *currentPlaybackTrack = playback.currentTrack;
+    NSString *currentTrackID = [self miniStreamingTrackIDFromPlaybackTrack:currentPlaybackTrack];
+    if (![currentTrackID isEqualToString:trackID]) {
+        return;
+    }
+
+    BOOL shouldDeferSwap = (currentPlaybackTrack != nil &&
+                            currentPlaybackTrack.url != nil &&
+                            !currentPlaybackTrack.url.isFileURL &&
+                            playback.isPlaying);
+    if (shouldDeferSwap) {
+        SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"download_completed_defer_swap track=%@", trackID]);
+        return;
+    }
+
+    BOOL wasPlaying = playback.isPlaying;
+    NSTimeInterval restoreTime = playback.currentTime;
+
+    SonoraMiniStreamingTrack *queueTrack = [self miniStreamingTrackFromPlaybackQueueByTrackID:trackID];
+    if (queueTrack == nil || self.miniStreamingPlaybackQueue.count == 0) {
+        [playback setShuffleEnabled:NO];
+        [playback playTrack:installedTrack];
+        if (restoreTime > 0.0) {
+            [playback seekToTime:restoreTime];
+        }
+        if (!wasPlaying && playback.isPlaying) {
+            [playback togglePlayPause];
+        }
+        return;
+    }
+
+    NSInteger startIndex = 0;
+    NSMutableArray<SonoraTrack *> *playbackQueue = [NSMutableArray arrayWithCapacity:self.miniStreamingPlaybackQueue.count];
+    for (NSUInteger idx = 0; idx < self.miniStreamingPlaybackQueue.count; idx += 1) {
+        SonoraMiniStreamingTrack *miniTrack = self.miniStreamingPlaybackQueue[idx];
+        if ([miniTrack.trackID isEqualToString:trackID]) {
+            startIndex = (NSInteger)idx;
+        }
+        [playbackQueue addObject:[self miniStreamingPlaybackTrackForMiniTrack:miniTrack]];
+    }
+    [playback setShuffleEnabled:NO];
+    [playback playTracks:playbackQueue startIndex:startIndex];
+    if (restoreTime > 0.0) {
+        [playback seekToTime:restoreTime];
+    }
+    if (!wasPlaying && playback.isPlaying) {
+        [playback togglePlayPause];
+    }
+}
+
+- (NSURL *)availableDestinationURLInDirectory:(NSURL *)directoryURL
+                                     baseName:(NSString *)baseName
+                                    extension:(NSString *)fileExtension {
+    NSString *normalizedBaseName = SonoraSanitizedFileComponent(baseName);
+    if (normalizedBaseName.length == 0) {
+        normalizedBaseName = @"track";
+    }
+
+    NSString *normalizedExtension = SonoraTrimmedStringValue(fileExtension).lowercaseString;
+    if (normalizedExtension.length == 0) {
+        normalizedExtension = @"mp3";
+    }
+
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    NSURL *candidateURL = [directoryURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", normalizedBaseName, normalizedExtension]];
+    if (![fileManager fileExistsAtPath:candidateURL.path]) {
+        return candidateURL;
+    }
+
+    for (NSUInteger index = 2; index <= 999; index += 1) {
+        NSString *candidateName = [NSString stringWithFormat:@"%@ (%lu).%@", normalizedBaseName, (unsigned long)index, normalizedExtension];
+        candidateURL = [directoryURL URLByAppendingPathComponent:candidateName];
+        if (![fileManager fileExistsAtPath:candidateURL.path]) {
+            return candidateURL;
+        }
+    }
+
+    NSString *uuid = [NSUUID UUID].UUIDString;
+    return [directoryURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@-%@.%@", normalizedBaseName, uuid, normalizedExtension]];
+}
+
+- (void)startMiniStreamingBackgroundDownloadFromURL:(NSURL *)downloadURL
+                                             payload:(NSDictionary<NSString *, id> *)payload
+                                             trackID:(NSString *)trackID {
+    if (downloadURL == nil || trackID.length == 0) {
+        return;
+    }
+    SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"download_start track=%@ url=%@",
+                                             trackID,
+                                             downloadURL.absoluteString ?: @""]);
+
+    __weak typeof(self) weakSelf = self;
+    NSURLSessionDownloadTask *existingTask = self.miniStreamingDownloadTasksByTrackID[trackID];
+    if (existingTask != nil) {
+        [existingTask cancel];
+    }
+
+    NSURLSessionDownloadTask *downloadTask = [NSURLSession.sharedSession downloadTaskWithURL:downloadURL
+                                                                            completionHandler:^(NSURL * _Nullable location,
+                                                                                                NSURLResponse * _Nullable response,
+                                                                                                NSError * _Nullable downloadError) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        void (^cleanup)(void) = ^{
+            [strongSelf.miniStreamingInstallingTrackIDs removeObject:trackID];
+            [strongSelf.miniStreamingDownloadTasksByTrackID removeObjectForKey:trackID];
+        };
+
+        if (downloadError != nil || location == nil) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                cleanup();
+                SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"download_failed track=%@ error=%@",
+                                                         trackID,
+                                                         downloadError.localizedDescription ?: @"unknown"]);
+                if ([strongSelf.miniStreamingActiveTrackID isEqualToString:trackID]) {
+                    strongSelf.miniStreamingActiveTrackID = nil;
+                }
+            });
+            return;
+        }
+
+        NSURL *musicDirectoryURL = [SonoraLibraryManager.sharedManager musicDirectoryURL];
+        NSString *title = SonoraSanitizedFileComponent(payload[@"title"]);
+        if (title.length == 0) {
+            title = trackID;
+        }
+        NSString *artist = SonoraSanitizedFileComponent(payload[@"artist"]);
+        NSString *baseName = (artist.length > 0) ? [NSString stringWithFormat:@"%@ - %@", artist, title] : title;
+
+        NSString *resolvedExtension = SonoraTrimmedStringValue(response.suggestedFilename.pathExtension);
+        if (resolvedExtension.length == 0) {
+            resolvedExtension = SonoraTrimmedStringValue(downloadURL.pathExtension);
+        }
+        if (resolvedExtension.length == 0) {
+            resolvedExtension = @"mp3";
+        }
+
+        NSURL *destinationURL = [strongSelf availableDestinationURLInDirectory:musicDirectoryURL
+                                                                       baseName:baseName
+                                                                      extension:resolvedExtension];
+        NSError *moveError = nil;
+        BOOL moved = [NSFileManager.defaultManager moveItemAtURL:location toURL:destinationURL error:&moveError];
+        if (!moved || moveError != nil) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                cleanup();
+                SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"download_move_failed track=%@ error=%@",
+                                                         trackID,
+                                                         moveError.localizedDescription ?: @"unknown"]);
+                if ([strongSelf.miniStreamingActiveTrackID isEqualToString:trackID]) {
+                    strongSelf.miniStreamingActiveTrackID = nil;
+                }
+            });
+            return;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            cleanup();
+            SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"download_completed track=%@ path=%@",
+                                                     trackID,
+                                                     destinationURL.path ?: @""]);
+            [strongSelf reloadTracks];
+            [strongSelf syncMiniStreamingPlaybackWithInstalledTrackAtURL:destinationURL
+                                                                 trackID:trackID];
+        });
+    }];
+    downloadTask.priority = NSURLSessionTaskPriorityLow;
+    self.miniStreamingDownloadTasksByTrackID[trackID] = downloadTask;
+    [downloadTask resume];
+}
+
+- (void)scheduleMiniStreamingBackgroundDownloadFromURL:(NSURL *)downloadURL
+                                                payload:(NSDictionary<NSString *, id> *)payload
+                                                trackID:(NSString *)trackID {
+    if (downloadURL == nil || trackID.length == 0) {
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * (NSTimeInterval)NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        NSString *currentTrackID = strongSelf.miniStreamingCurrentPlaybackTrackID ?: @"";
+        if (currentTrackID.length > 0 && ![currentTrackID isEqualToString:trackID]) {
+            return;
+        }
+        [strongSelf startMiniStreamingBackgroundDownloadFromURL:downloadURL
+                                                        payload:payload
+                                                        trackID:trackID];
+    });
+}
+
+- (void)stopMiniStreamingPlaceholderIfNeededForTrackID:(NSString *)trackID {
+    if (trackID.length == 0) {
+        return;
+    }
+
+    SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+    SonoraTrack *currentTrack = playback.currentTrack;
+    NSString *currentTrackID = [self miniStreamingTrackIDFromPlaybackTrack:currentTrack];
+    if (![currentTrackID isEqualToString:trackID]) {
+        return;
+    }
+    if (![self isMiniStreamingPlaceholderTrack:currentTrack]) {
+        return;
+    }
+    if (playback.isPlaying) {
+        [playback togglePlayPause];
+    }
+}
+
+- (BOOL)miniStreamingResolveCooldownActiveForTrackID:(NSString *)trackID {
+    if (trackID.length == 0) {
+        return NO;
+    }
+
+    NSDate *retryAfter = self.miniStreamingResolveRetryAfterByTrackID[trackID];
+    if (retryAfter == nil) {
+        return NO;
+    }
+
+    NSTimeInterval remaining = [retryAfter timeIntervalSinceNow];
+    if (remaining <= 0.0) {
+        [self.miniStreamingResolveRetryAfterByTrackID removeObjectForKey:trackID];
+        return NO;
+    }
+
+    SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"resolve_skip_cooldown track=%@ wait=%.1f",
+                                             trackID,
+                                             remaining]);
+    return YES;
+}
+
+- (void)startMiniStreamingInstallIfNeededForTrack:(SonoraMiniStreamingTrack *)track
+                                       showErrorUI:(BOOL)showErrorUI {
+    if (track == nil || track.trackID.length == 0) {
+        return;
+    }
+
+    SonoraTrack *knownInstalledTrack = [self knownInstalledMiniStreamingTrackForTrack:track];
+    if (knownInstalledTrack != nil && knownInstalledTrack.url.path.length > 0 &&
+        [NSFileManager.defaultManager fileExistsAtPath:knownInstalledTrack.url.path]) {
+        [self.miniStreamingInstallingTrackIDs removeObject:track.trackID];
+        SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"play_installed track=%@", track.trackID]);
+        [self syncMiniStreamingPlaybackWithInstalledTrackAtURL:knownInstalledTrack.url trackID:track.trackID];
+        return;
+    }
+
+    NSDictionary<NSString *, id> *cachedPayload = self.miniStreamingResolvedPayloadByTrackID[track.trackID];
+    if ([self isUsableMiniStreamingPayload:cachedPayload]) {
+        [self.miniStreamingInstallingTrackIDs removeObject:track.trackID];
+        SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"play_stream_cached_payload track=%@", track.trackID]);
+        SonoraTrack *currentPlaybackTrack = SonoraPlaybackManager.sharedManager.currentTrack;
+        NSString *currentTrackID = [self miniStreamingTrackIDFromPlaybackTrack:currentPlaybackTrack];
+        BOOL shouldStartPlayback = showErrorUI ||
+                                   [self isMiniStreamingPlaceholderTrack:currentPlaybackTrack] ||
+                                   [currentTrackID isEqualToString:track.trackID];
+        if (shouldStartPlayback) {
+            [self playMiniStreamingPlaybackQueueIfCurrentForTrack:track];
+        }
+        NSURL *cachedDownloadURL = [self miniStreamingDownloadURLFromPayload:cachedPayload];
+        if (cachedDownloadURL != nil) {
+            [self scheduleMiniStreamingBackgroundDownloadFromURL:cachedDownloadURL
+                                                         payload:cachedPayload
+                                                         trackID:track.trackID];
+        }
+        return;
+    } else if (cachedPayload != nil) {
+        [self.miniStreamingResolvedPayloadByTrackID removeObjectForKey:track.trackID];
+    }
+
+    if ([self miniStreamingResolveCooldownActiveForTrackID:track.trackID]) {
+        [self stopMiniStreamingPlaceholderIfNeededForTrackID:track.trackID];
+        return;
+    }
+
+    if ([self.miniStreamingInstallingTrackIDs containsObject:track.trackID]) {
+        return;
+    }
+
+    SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"resolve_start track=%@", track.trackID]);
+    [self.miniStreamingInstallingTrackIDs addObject:track.trackID];
+    __weak typeof(self) weakSelf = self;
+    [self.miniStreamingClient resolveDownloadForTrackID:track.trackID
+                                             completion:^(NSDictionary<NSString *,id> * _Nullable payload, NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        if (error != nil || payload == nil) {
+            [strongSelf.miniStreamingInstallingTrackIDs removeObject:track.trackID];
+            strongSelf.miniStreamingResolveRetryAfterByTrackID[track.trackID] = [NSDate dateWithTimeIntervalSinceNow:20.0];
+            SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"resolve_failed track=%@ error=%@",
+                                                     track.trackID,
+                                                     error.localizedDescription ?: @"unknown"]);
+            if ([strongSelf.miniStreamingActiveTrackID isEqualToString:track.trackID]) {
+                strongSelf.miniStreamingActiveTrackID = nil;
+            }
+            [strongSelf stopMiniStreamingPlaceholderIfNeededForTrackID:track.trackID];
+            if (showErrorUI) {
+                NSString *message = error.localizedDescription ?: @"Could not resolve download link.";
+                SonoraPresentAlert(strongSelf, @"Install Failed", message);
+            }
+            return;
+        }
+
+        if (![strongSelf isUsableMiniStreamingPayload:payload]) {
+            [strongSelf.miniStreamingInstallingTrackIDs removeObject:track.trackID];
+            strongSelf.miniStreamingResolveRetryAfterByTrackID[track.trackID] = [NSDate dateWithTimeIntervalSinceNow:20.0];
+            SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"resolve_invalid_payload track=%@",
+                                                     track.trackID]);
+            if ([strongSelf.miniStreamingActiveTrackID isEqualToString:track.trackID]) {
+                strongSelf.miniStreamingActiveTrackID = nil;
+            }
+            [strongSelf stopMiniStreamingPlaceholderIfNeededForTrackID:track.trackID];
+            if (showErrorUI) {
+                SonoraPresentAlert(strongSelf, @"Install Failed", @"RapidAPI returned invalid download URL.");
+            }
+            return;
+        }
+
+        [strongSelf.miniStreamingInstallingTrackIDs removeObject:track.trackID];
+        [strongSelf.miniStreamingResolveRetryAfterByTrackID removeObjectForKey:track.trackID];
+        strongSelf.miniStreamingResolvedPayloadByTrackID[track.trackID] = payload;
+        NSURL *downloadURL = [strongSelf miniStreamingDownloadURLFromPayload:payload];
+        SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"resolve_succeeded track=%@ url=%@",
+                                                 track.trackID,
+                                                 downloadURL.absoluteString ?: @""]);
+        SonoraTrack *currentPlaybackTrack = SonoraPlaybackManager.sharedManager.currentTrack;
+        NSString *currentTrackID = [strongSelf miniStreamingTrackIDFromPlaybackTrack:currentPlaybackTrack];
+        BOOL shouldStartPlayback = showErrorUI ||
+                                   [strongSelf isMiniStreamingPlaceholderTrack:currentPlaybackTrack] ||
+                                   [currentTrackID isEqualToString:track.trackID];
+        if (shouldStartPlayback) {
+            [strongSelf playMiniStreamingPlaybackQueueIfCurrentForTrack:track];
+        }
+        [strongSelf scheduleMiniStreamingBackgroundDownloadFromURL:downloadURL
+                                                           payload:payload
+                                                           trackID:track.trackID];
+    }];
+}
+
+- (void)installMiniStreamingTrack:(SonoraMiniStreamingTrack *)track
+                             queue:(NSArray<SonoraMiniStreamingTrack *> *)queue
+                        startIndex:(NSInteger)startIndex
+                  preferredArtwork:(UIImage * _Nullable)preferredArtwork {
+    if (track == nil || track.trackID.length == 0) {
+        return;
+    }
+    SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"install_tap track=%@", track.trackID]);
+    [self.miniStreamingResolveRetryAfterByTrackID removeObjectForKey:track.trackID];
+
+    if (![self.miniStreamingClient isConfigured]) {
+        SonoraPresentAlert(self,
+                       @"Mini Streaming Disabled",
+                       @"Set BACKEND_BASE_URL in scheme env or Info.plist.");
+        return;
+    }
+
+    if (preferredArtwork != nil && track.artworkURL.length > 0) {
+        [self.miniStreamingArtworkCache setObject:preferredArtwork forKey:track.artworkURL];
+    }
+    NSArray<SonoraMiniStreamingTrack *> *normalizedQueue = [self miniStreamingQueueFromContext:queue selectedTrack:track];
+    if (normalizedQueue.count == 0) {
+        return;
+    }
+    [self prepareMiniStreamingInstallForTrack:track queue:normalizedQueue startIndex:startIndex];
+    [self startMiniStreamingInstallIfNeededForTrack:track showErrorUI:YES];
+}
+
 - (void)addMusicTapped {
     if ([self isLibraryAtOrAboveStorageLimit]) {
         [self presentStorageLimitReachedAlert];
         return;
     }
+    UIDocumentPickerViewController *picker = nil;
+    if (@available(iOS 14.0, *)) {
+        UTType *audioType = [UTType typeWithIdentifier:@"public.audio"];
+        if (audioType != nil) {
+            picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[audioType] asCopy:YES];
+        }
+    }
+    if (picker == nil) {
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.audio"]
+                                                                        inMode:UIDocumentPickerModeImport];
+    }
+    picker.delegate = self;
+    picker.allowsMultipleSelection = YES;
+    picker.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    (void)controller;
+    if (urls.count == 0) {
+        return;
+    }
+
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    NSURL *musicDirectoryURL = [SonoraLibraryManager.sharedManager musicDirectoryURL];
+    NSSet<NSString *> *allowedExtensions = SonoraSupportedAudioExtensions();
+    NSUInteger importedCount = 0;
+    NSUInteger failedCount = 0;
+    NSUInteger skippedUnsupportedCount = 0;
+    BOOL blockedByStorageLimit = NO;
+
+    for (NSURL *sourceURL in urls) {
+        if (sourceURL == nil) {
+            failedCount += 1;
+            continue;
+        }
+        if ([self isLibraryAtOrAboveStorageLimit]) {
+            blockedByStorageLimit = YES;
+            break;
+        }
+
+        BOOL grantedAccess = [sourceURL startAccessingSecurityScopedResource];
+        @try {
+            NSString *extension = SonoraTrimmedStringValue(sourceURL.pathExtension).lowercaseString;
+            if (extension.length == 0 || ![allowedExtensions containsObject:extension]) {
+                skippedUnsupportedCount += 1;
+                continue;
+            }
+
+            NSString *baseName = sourceURL.lastPathComponent.stringByDeletingPathExtension;
+            if (baseName.length == 0) {
+                baseName = @"track";
+            }
+            NSURL *destinationURL = [self availableDestinationURLInDirectory:musicDirectoryURL
+                                                                     baseName:baseName
+                                                                    extension:extension];
+            NSError *copyError = nil;
+            BOOL copied = [fileManager copyItemAtURL:sourceURL toURL:destinationURL error:&copyError];
+            if (!copied || copyError != nil) {
+                failedCount += 1;
+                continue;
+            }
+            importedCount += 1;
+        } @finally {
+            if (grantedAccess) {
+                [sourceURL stopAccessingSecurityScopedResource];
+            }
+        }
+    }
+
     [self reloadTracks];
+
+    if (blockedByStorageLimit) {
+        [self presentStorageLimitReachedAlert];
+    }
+    if (failedCount == 0 && skippedUnsupportedCount == 0 && !blockedByStorageLimit) {
+        if (importedCount == 0) {
+            SonoraPresentAlert(self, @"No Music Added", @"No supported audio files were selected.");
+        }
+        return;
+    }
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (importedCount > 0) {
+        [parts addObject:[NSString stringWithFormat:@"Imported: %lu", (unsigned long)importedCount]];
+    }
+    if (skippedUnsupportedCount > 0) {
+        [parts addObject:[NSString stringWithFormat:@"Unsupported files skipped: %lu", (unsigned long)skippedUnsupportedCount]];
+    }
+    if (failedCount > 0) {
+        [parts addObject:[NSString stringWithFormat:@"Failed: %lu", (unsigned long)failedCount]];
+    }
+    if (blockedByStorageLimit) {
+        [parts addObject:@"Stopped: storage limit reached"];
+    }
+    NSString *message = [parts componentsJoinedByString:@"\n"];
+    if (message.length == 0) {
+        message = @"Could not import selected files.";
+    }
+    SonoraPresentAlert(self, @"Import Result", message);
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    (void)controller;
 }
 
 - (unsigned long long)currentLibraryUsageBytes {
@@ -1360,7 +5174,11 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:SonoraWhiteSectionTitleLabel(displayTitle)];
 
     if (!self.musicOnlyMode) {
-        self.navigationItem.rightBarButtonItems = nil;
+        UIBarButtonItem *searchItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]
+                                                                        style:UIBarButtonItemStylePlain
+                                                                       target:self
+                                                                       action:@selector(searchButtonTapped)];
+        self.navigationItem.rightBarButtonItems = @[searchItem];
         return;
     }
 
@@ -1525,6 +5343,8 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
         return 0;
     }
     switch ([self sectionTypeForIndex:section]) {
+        case SonoraSearchSectionTypeMiniStreaming:
+            return 0;
         case SonoraSearchSectionTypePlaylists:
             return self.filteredPlaylists.count;
         case SonoraSearchSectionTypeArtists:
@@ -1545,6 +5365,8 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
         return nil;
     }
     switch ([self sectionTypeForIndex:section]) {
+        case SonoraSearchSectionTypeMiniStreaming:
+            return nil;
         case SonoraSearchSectionTypePlaylists:
             return @"Playlists";
         case SonoraSearchSectionTypeArtists:
@@ -1646,6 +5468,7 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
         self.searchQuery = artistTitle;
         self.searchController.searchBar.text = artistTitle;
         [self applySearchFilterAndReload];
+        [self refreshMiniStreamingForCurrentQuery];
         return;
     }
 
@@ -1767,6 +5590,8 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (NSString *)titleForSearchSectionType:(SonoraSearchSectionType)sectionType {
     switch (sectionType) {
+        case SonoraSearchSectionTypeMiniStreaming:
+            return @"Tracks";
         case SonoraSearchSectionTypePlaylists:
             return @"Playlists";
         case SonoraSearchSectionTypeArtists:
@@ -1792,10 +5617,12 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     }
 
     switch ([self sectionTypeForIndex:section]) {
+        case SonoraSearchSectionTypeMiniStreaming:
+            return self.miniStreamingTracks.count;
         case SonoraSearchSectionTypePlaylists:
             return self.filteredPlaylists.count;
         case SonoraSearchSectionTypeArtists:
-            return self.artistResults.count;
+            return self.miniStreamingArtists.count;
         case SonoraSearchSectionTypeTracks:
             return self.filteredTracks.count;
     }
@@ -1808,9 +5635,45 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         return [UICollectionViewCell new];
     }
 
-    SonoraMusicSearchCardCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:SonoraMusicSearchCardCellReuseID
-                                                                             forIndexPath:indexPath];
     SonoraSearchSectionType sectionType = [self sectionTypeForIndex:indexPath.section];
+    if (sectionType == SonoraSearchSectionTypeMiniStreaming) {
+        SonoraMiniStreamingListCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:SonoraMiniStreamingListCellReuseID
+                                                                                       forIndexPath:indexPath];
+        if (indexPath.item < self.miniStreamingTracks.count) {
+            SonoraMiniStreamingTrack *track = self.miniStreamingTracks[indexPath.item];
+            UIImage *artwork = [self cachedMiniStreamingArtworkForTrack:track];
+            [self loadMiniStreamingArtworkIfNeededForTrack:track];
+            SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
+            NSString *currentTrackID = [self miniStreamingTrackIDFromPlaybackTrack:playback.currentTrack];
+            BOOL isCurrent = [currentTrackID isEqualToString:track.trackID];
+            BOOL sameQueue = [self miniStreamingPlaybackQueueMatchesMiniTracks:self.miniStreamingTracks];
+            BOOL showsPlaybackIndicator = (sameQueue && isCurrent && playback.isPlaying);
+            NSString *subtitle = track.artists.length > 0 ? track.artists : @"Spotify";
+            [cell configureWithTitle:track.title
+                            subtitle:subtitle
+                         durationText:SonoraFormatDuration(track.duration)
+                               image:artwork
+                            isCurrent:isCurrent
+               showsPlaybackIndicator:showsPlaybackIndicator
+                       showsSeparator:(indexPath.item + 1 < self.miniStreamingTracks.count)];
+        }
+        return cell;
+    }
+
+    if (sectionType == SonoraSearchSectionTypeArtists) {
+        SonoraMusicSearchCardCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:SonoraMusicSearchCardCellReuseID
+                                                                                     forIndexPath:indexPath];
+        if (indexPath.item < self.miniStreamingArtists.count) {
+            SonoraMiniStreamingArtist *artist = self.miniStreamingArtists[indexPath.item];
+            UIImage *artwork = [self cachedMiniStreamingArtworkForURL:artist.artworkURL];
+            [self loadMiniStreamingArtworkIfNeededForURL:artist.artworkURL];
+            [cell configureWithTitle:artist.name subtitle:@"Artist" image:artwork];
+        }
+        return cell;
+    }
+
+    SonoraMusicSearchCardCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:SonoraMusicSearchCardCellReuseID
+                                                                                 forIndexPath:indexPath];
     if (sectionType == SonoraSearchSectionTypePlaylists) {
         if (indexPath.item < self.filteredPlaylists.count) {
             SonoraPlaylist *playlist = self.filteredPlaylists[indexPath.item];
@@ -1819,15 +5682,6 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
                                                                       size:CGSizeMake(220.0, 220.0)];
             NSString *subtitle = [NSString stringWithFormat:@"%ld tracks", (long)playlist.trackIDs.count];
             [cell configureWithTitle:playlist.name subtitle:subtitle image:cover];
-        }
-    } else if (sectionType == SonoraSearchSectionTypeArtists) {
-        if (indexPath.item < self.artistResults.count) {
-            NSDictionary<NSString *, id> *artistEntry = self.artistResults[indexPath.item];
-            NSArray<SonoraTrack *> *matchedTracks = artistEntry[@"tracks"] ?: @[];
-            SonoraTrack *coverTrack = matchedTracks.firstObject;
-            NSString *title = artistEntry[@"title"] ?: @"Artist";
-            NSString *subtitle = [NSString stringWithFormat:@"%ld tracks", (long)matchedTracks.count];
-            [cell configureWithTitle:title subtitle:subtitle image:coverTrack.artwork];
         }
     } else {
         if (indexPath.item < self.filteredTracks.count) {
@@ -1864,8 +5718,22 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (collectionView != self.searchCollectionView || self.musicOnlyMode) {
         return;
     }
+    [self.searchController.searchBar resignFirstResponder];
 
     SonoraSearchSectionType sectionType = [self sectionTypeForIndex:indexPath.section];
+    if (sectionType == SonoraSearchSectionTypeMiniStreaming) {
+        if (indexPath.item >= self.miniStreamingTracks.count) {
+            return;
+        }
+        SonoraMiniStreamingTrack *track = self.miniStreamingTracks[indexPath.item];
+        UIImage *artwork = [self cachedMiniStreamingArtworkForTrack:track];
+        [self installMiniStreamingTrack:track
+                                  queue:self.miniStreamingTracks
+                             startIndex:indexPath.item
+                       preferredArtwork:artwork];
+        return;
+    }
+
     if (sectionType == SonoraSearchSectionTypePlaylists) {
         if (indexPath.item >= self.filteredPlaylists.count) {
             return;
@@ -1878,14 +5746,32 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     }
 
     if (sectionType == SonoraSearchSectionTypeArtists) {
-        if (indexPath.item >= self.artistResults.count) {
+        if (indexPath.item >= self.miniStreamingArtists.count) {
             return;
         }
-        NSDictionary<NSString *, id> *artistEntry = self.artistResults[indexPath.item];
-        NSString *artistTitle = artistEntry[@"title"] ?: @"";
-        self.searchQuery = artistTitle;
-        self.searchController.searchBar.text = artistTitle;
-        [self applySearchFilterAndReload];
+        SonoraMiniStreamingArtist *artist = self.miniStreamingArtists[indexPath.item];
+        if (artist == nil || artist.artistID.length == 0) {
+            return;
+        }
+
+        __weak typeof(self) weakSelf = self;
+        SonoraMiniStreamingArtistViewController *artistView = [[SonoraMiniStreamingArtistViewController alloc] initWithArtist:artist
+                                                                                                                        client:self.miniStreamingClient
+                                                                                                                installHandler:^(SonoraMiniStreamingTrack * _Nonnull track,
+                                                                                                                                NSArray<SonoraMiniStreamingTrack *> * _Nonnull queue,
+                                                                                                                                NSInteger startIndex,
+                                                                                                                                UIImage * _Nullable artwork) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            [strongSelf installMiniStreamingTrack:track
+                                            queue:queue
+                                       startIndex:startIndex
+                                 preferredArtwork:artwork];
+        }];
+        artistView.hidesBottomBarWhenPushed = YES;
+        [self.navigationController pushViewController:artistView animated:YES];
         return;
     }
 
@@ -1917,6 +5803,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     self.searchQuery = searchController.searchBar.text ?: @"";
     [self applySearchFilterAndReload];
+    [self refreshMiniStreamingForCurrentQuery];
     [self updateSearchControllerAttachment];
 }
 
@@ -4564,6 +8451,8 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 @property (nonatomic, strong) UIButton *favoriteButton;
 @property (nonatomic, strong) UIButton *sleepTimerButton;
 @property (nonatomic, strong) SonoraArtworkEqualizerBadgeView *equalizerBadgeView;
+@property (nonatomic, strong) UIView *artworkLoadingOverlayView;
+@property (nonatomic, strong) UIActivityIndicatorView *artworkLoadingSpinner;
 @property (nonatomic, strong) NSLayoutConstraint *artworkLeadingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *artworkTrailingConstraint;
 @property (nonatomic, assign) BOOL scrubbing;
@@ -4672,6 +8561,22 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     equalizerBadge.hidden = YES;
     self.equalizerBadgeView = equalizerBadge;
     [artworkView addSubview:equalizerBadge];
+
+    UIView *artworkLoadingOverlayView = [[UIView alloc] init];
+    artworkLoadingOverlayView.translatesAutoresizingMaskIntoConstraints = NO;
+    artworkLoadingOverlayView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.36];
+    artworkLoadingOverlayView.userInteractionEnabled = NO;
+    artworkLoadingOverlayView.hidden = YES;
+    self.artworkLoadingOverlayView = artworkLoadingOverlayView;
+
+    UIActivityIndicatorView *artworkLoadingSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    artworkLoadingSpinner.translatesAutoresizingMaskIntoConstraints = NO;
+    artworkLoadingSpinner.color = UIColor.whiteColor;
+    artworkLoadingSpinner.hidesWhenStopped = NO;
+    self.artworkLoadingSpinner = artworkLoadingSpinner;
+
+    [artworkLoadingOverlayView addSubview:artworkLoadingSpinner];
+    [artworkView addSubview:artworkLoadingOverlayView];
 
     UILabel *artistLabel = [[UILabel alloc] init];
     artistLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4828,6 +8733,12 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         [equalizerBadge.trailingAnchor constraintEqualToAnchor:artworkView.trailingAnchor constant:-10.0],
         [equalizerBadge.widthAnchor constraintEqualToConstant:30.0],
         [equalizerBadge.heightAnchor constraintEqualToConstant:24.0],
+        [artworkLoadingOverlayView.topAnchor constraintEqualToAnchor:artworkView.topAnchor],
+        [artworkLoadingOverlayView.leadingAnchor constraintEqualToAnchor:artworkView.leadingAnchor],
+        [artworkLoadingOverlayView.trailingAnchor constraintEqualToAnchor:artworkView.trailingAnchor],
+        [artworkLoadingOverlayView.bottomAnchor constraintEqualToAnchor:artworkView.bottomAnchor],
+        [artworkLoadingSpinner.centerXAnchor constraintEqualToAnchor:artworkLoadingOverlayView.centerXAnchor],
+        [artworkLoadingSpinner.centerYAnchor constraintEqualToAnchor:artworkLoadingOverlayView.centerYAnchor],
 
         [slider.topAnchor constraintEqualToAnchor:artworkView.bottomAnchor constant:16.0],
         [slider.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16.0],
@@ -4893,6 +8804,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     UIImage *thumbImage = SonoraSliderThumbImage(14.5, primary);
     [self.progressSlider setThumbImage:thumbImage forState:UIControlStateNormal];
     [self.progressSlider setThumbImage:thumbImage forState:UIControlStateHighlighted];
+    self.artworkLoadingOverlayView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.38];
 
     BOOL controlsEnabled = self.playPauseButton.enabled;
     UIColor *controlColor = controlsEnabled ? primary : [secondary colorWithAlphaComponent:0.65];
@@ -4989,7 +8901,8 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (void)updateFavoriteButton {
     SonoraTrack *track = SonoraPlaybackManager.sharedManager.currentTrack;
-    if (track == nil || track.identifier.length == 0) {
+    BOOL isPlaceholder = [self isMiniStreamingPlaceholderTrack:track];
+    if (track == nil || track.identifier.length == 0 || isPlaceholder) {
         self.favoriteButton.hidden = YES;
         self.favoriteButton.enabled = NO;
         return;
@@ -5025,7 +8938,8 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     SonoraPlaybackManager *playback = SonoraPlaybackManager.sharedManager;
     BOOL enabled = SonoraArtworkEqualizerEnabledFromDefaults();
     BOOL hasTrack = (playback.currentTrack != nil);
-    BOOL visible = enabled && hasTrack;
+    BOOL isPlaceholder = [self isMiniStreamingPlaceholderTrack:playback.currentTrack];
+    BOOL visible = enabled && hasTrack && !isPlaceholder;
     self.equalizerBadgeView.hidden = !visible;
     if (!visible) {
         [self.equalizerBadgeView setPlaying:NO];
@@ -5036,6 +8950,36 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     BOOL isPlaying = playback.isPlaying;
     [self.equalizerBadgeView setPlaying:isPlaying];
     [self.equalizerBadgeView setLevel:isPlaying ? 0.18 : 0.06];
+}
+
+- (void)updateArtworkLoadingOverlayForTrack:(SonoraTrack * _Nullable)track {
+    BOOL isMiniStreamingPlaceholder = [self isMiniStreamingPlaceholderTrack:track];
+    self.artworkLoadingOverlayView.hidden = !isMiniStreamingPlaceholder;
+    if (isMiniStreamingPlaceholder) {
+        [self.artworkLoadingSpinner startAnimating];
+    } else {
+        [self.artworkLoadingSpinner stopAnimating];
+    }
+}
+
+- (BOOL)isMiniStreamingPlaceholderTrack:(SonoraTrack * _Nullable)track {
+    if (track == nil || track.identifier.length == 0) {
+        return NO;
+    }
+    if (![track.identifier hasPrefix:SonoraMiniStreamingPlaceholderPrefix]) {
+        return NO;
+    }
+
+    NSURL *url = track.url;
+    if (url == nil) {
+        return YES;
+    }
+    if (!url.isFileURL) {
+        return NO;
+    }
+
+    NSString *path = url.path ?: @"";
+    return path.length == 0 || [path isEqualToString:@"/dev/null"];
 }
 
 - (void)handlePlaybackMeterChanged:(NSNotification *)notification {
@@ -5089,6 +9033,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         self.artworkView.image = [UIImage systemImageNamed:@"music.note.list"];
         self.artworkView.contentMode = UIViewContentModeCenter;
         self.artworkView.tintColor = SonoraPlayerPrimaryColor();
+        [self updateArtworkLoadingOverlayForTrack:nil];
 
         self.subtitleLabel.text = @"";
         self.titleLabel.text = @"No track selected";
@@ -5113,6 +9058,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
     self.artworkView.contentMode = UIViewContentModeScaleAspectFill;
     self.artworkView.image = track.artwork;
+    [self updateArtworkLoadingOverlayForTrack:track];
 
     self.subtitleLabel.text = (track.artist.length > 0 ? track.artist : @"");
     self.titleLabel.text = (track.title.length > 0 ? track.title : track.fileName);

@@ -8,6 +8,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
 #import <math.h>
+#import <mach/mach.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <objc/message.h>
 
@@ -50,6 +51,11 @@ static NSString * const kPlaybackSessionQueueTrackIDsKey = @"sonora.playbackSess
 static NSString * const kPlaybackSessionCurrentTrackIDKey = @"sonora.playbackSession.currentTrackID";
 static NSString * const kPlaybackSessionCurrentTimeKey = @"sonora.playbackSession.currentTime";
 static NSString * const kPlaybackSessionWasPlayingKey = @"sonora.playbackSession.wasPlaying";
+static NSString * const kMiniStreamingPlaceholderPrefix = @"mini-streaming-placeholder-";
+static NSString * const kDiagnosticsDirectoryName = @"SonoraDiagnostics";
+static NSString * const kDiagnosticsLogFileName = @"runtime.log";
+static NSString * const kDiagnosticsLogFileBackupName = @"runtime-prev.log";
+static unsigned long long const kDiagnosticsLogMaxBytes = 4ull * 1024ull * 1024ull;
 
 static BOOL SonoraShouldPreservePlayerModes(NSUserDefaults *defaults) {
     if ([defaults objectForKey:kPlayerSettingsPreserveModesKey] == nil) {
@@ -80,6 +86,146 @@ static NSString *SonoraStableHashString(NSString *value) {
     }
 
     return [NSString stringWithFormat:@"%016llx", hash];
+}
+
+static dispatch_queue_t SonoraDiagnosticsQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.sonora.diagnostics.log", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static NSString *SonoraDiagnosticsTimestampString(void) {
+    static NSDateFormatter *formatter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+        formatter.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+    });
+    return [formatter stringFromDate:[NSDate date]] ?: @"";
+}
+
+static NSURL *SonoraDiagnosticsDirectoryURL(void) {
+    NSURL *documentsURL = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    if (documentsURL == nil) {
+        return nil;
+    }
+    return [documentsURL URLByAppendingPathComponent:kDiagnosticsDirectoryName isDirectory:YES];
+}
+
+static NSURL *SonoraDiagnosticsLogFileURL(void) {
+    NSURL *directoryURL = SonoraDiagnosticsDirectoryURL();
+    if (directoryURL == nil) {
+        return nil;
+    }
+    return [directoryURL URLByAppendingPathComponent:kDiagnosticsLogFileName];
+}
+
+static void SonoraDiagnosticsRotateIfNeeded(NSURL *fileURL) {
+    NSDictionary<NSFileAttributeKey, id> *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:fileURL.path error:nil];
+    unsigned long long currentSize = [attributes[NSFileSize] respondsToSelector:@selector(unsignedLongLongValue)] ? [attributes[NSFileSize] unsignedLongLongValue] : 0ull;
+    if (currentSize < kDiagnosticsLogMaxBytes) {
+        return;
+    }
+
+    NSURL *directoryURL = [fileURL URLByDeletingLastPathComponent];
+    NSURL *backupURL = [directoryURL URLByAppendingPathComponent:kDiagnosticsLogFileBackupName];
+    [NSFileManager.defaultManager removeItemAtURL:backupURL error:nil];
+    [NSFileManager.defaultManager moveItemAtURL:fileURL toURL:backupURL error:nil];
+}
+
+void SonoraDiagnosticsLog(NSString *component, NSString *message) {
+    NSString *normalizedComponent = [component isKindOfClass:NSString.class] ? component : @"app";
+    NSString *normalizedMessage = [message isKindOfClass:NSString.class] ? message : @"";
+    if (normalizedMessage.length == 0) {
+        return;
+    }
+
+    dispatch_async(SonoraDiagnosticsQueue(), ^{
+        NSURL *directoryURL = SonoraDiagnosticsDirectoryURL();
+        NSURL *fileURL = SonoraDiagnosticsLogFileURL();
+        if (directoryURL == nil || fileURL == nil) {
+            return;
+        }
+
+        [NSFileManager.defaultManager createDirectoryAtURL:directoryURL withIntermediateDirectories:YES attributes:nil error:nil];
+        SonoraDiagnosticsRotateIfNeeded(fileURL);
+
+        NSString *line = [NSString stringWithFormat:@"%@ [%@] %@\n", SonoraDiagnosticsTimestampString(), normalizedComponent, normalizedMessage];
+        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        if (data.length == 0) {
+            return;
+        }
+
+        if (![NSFileManager.defaultManager fileExistsAtPath:fileURL.path]) {
+            [NSFileManager.defaultManager createFileAtPath:fileURL.path contents:nil attributes:nil];
+        }
+
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingToURL:fileURL error:nil];
+        if (handle == nil) {
+            return;
+        }
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:data];
+        } @catch (__unused NSException *exception) {
+        } @finally {
+            [handle closeFile];
+        }
+    });
+}
+
+NSString *SonoraDiagnosticsLogFilePath(void) {
+    NSURL *fileURL = SonoraDiagnosticsLogFileURL();
+    return fileURL.path ?: @"";
+}
+
+static uint64_t SonoraProcessPhysicalFootprintBytes(void) {
+    task_vm_info_data_t vmInfo;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t status = task_info(mach_task_self_, TASK_VM_INFO, (task_info_t)&vmInfo, &count);
+    if (status == KERN_SUCCESS && vmInfo.phys_footprint > 0) {
+        return vmInfo.phys_footprint;
+    }
+
+    mach_task_basic_info_data_t basicInfo;
+    mach_msg_type_number_t basicCount = MACH_TASK_BASIC_INFO_COUNT;
+    status = task_info(mach_task_self_, MACH_TASK_BASIC_INFO, (task_info_t)&basicInfo, &basicCount);
+    if (status == KERN_SUCCESS) {
+        return (uint64_t)basicInfo.resident_size;
+    }
+    return 0ull;
+}
+
+static double SonoraProcessCPUUsagePercent(void) {
+    thread_array_t threads = NULL;
+    mach_msg_type_number_t threadCount = 0;
+    kern_return_t status = task_threads(mach_task_self_, &threads, &threadCount);
+    if (status != KERN_SUCCESS || threads == NULL || threadCount == 0) {
+        return -1.0;
+    }
+
+    double totalCPU = 0.0;
+    for (mach_msg_type_number_t index = 0; index < threadCount; index += 1) {
+        thread_basic_info_data_t basicInfo;
+        mach_msg_type_number_t infoCount = THREAD_BASIC_INFO_COUNT;
+        status = thread_info(threads[index], THREAD_BASIC_INFO, (thread_info_t)&basicInfo, &infoCount);
+        if (status != KERN_SUCCESS) {
+            continue;
+        }
+        if ((basicInfo.flags & TH_FLAGS_IDLE) != 0) {
+            continue;
+        }
+        totalCPU += ((double)basicInfo.cpu_usage / (double)TH_USAGE_SCALE) * 100.0;
+    }
+
+    vm_size_t deallocateSize = (vm_size_t)threadCount * (vm_size_t)sizeof(thread_t);
+    vm_deallocate(mach_task_self_, (vm_address_t)threads, deallocateSize);
+    return totalCPU;
 }
 
 static void SonoraSyncSleepLiveActivity(NSTimeInterval remainingSeconds) {
@@ -1167,6 +1313,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     if (self) {
         _cachedPlaylists = @[];
         _coverCache = [[NSCache alloc] init];
+        _coverCache.countLimit = 96;
+        _coverCache.totalCostLimit = 64 * 1024 * 1024;
         [self reloadPlaylists];
     }
     return self;
@@ -2216,9 +2364,14 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 @interface SonoraPlaybackManager () <AVAudioPlayerDelegate>
 
 @property (nonatomic, strong, nullable) AVAudioPlayer *audioPlayer;
+@property (nonatomic, strong, nullable) AVPlayer *streamingPlayer;
+@property (nonatomic, strong, nullable) id streamTimeObserver;
+@property (nonatomic, strong, nullable) id streamEndObserver;
+@property (nonatomic, strong, nullable) id streamFailedObserver;
 @property (nonatomic, copy) NSArray<SonoraTrack *> *queue;
 @property (nonatomic, assign) NSInteger currentIndex;
 @property (nonatomic, strong, nullable) NSTimer *progressTimer;
+@property (nonatomic, strong, nullable) NSTimer *diagnosticsTimer;
 @property (nonatomic, assign) SonoraRepeatMode repeatMode;
 @property (nonatomic, assign, getter=isShuffleEnabled) BOOL shuffleEnabled;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *shuffleBag;
@@ -2231,6 +2384,10 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 @property (nonatomic, assign) float currentMeterLevel;
 @property (nonatomic, copy) NSString *pendingRestoredTrackID;
 @property (nonatomic, assign) NSTimeInterval pendingRestoredTime;
+@property (nonatomic, assign) BOOL placeholderPlaybackActive;
+@property (nonatomic, assign) BOOL streamSeekInFlight;
+@property (nonatomic, assign) NSTimeInterval streamSeekTargetTime;
+@property (nonatomic, assign) NSTimeInterval streamSeekStartedAt;
 
 @end
 
@@ -2262,6 +2419,9 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         _currentMeterLevel = 0.0f;
         _pendingRestoredTrackID = @"";
         _pendingRestoredTime = 0.0;
+        _placeholderPlaybackActive = NO;
+        _streamSeekInFlight = NO;
+        _streamSeekTargetTime = 0.0;
         [self restorePlaybackSessionFromDefaults];
         [NSNotificationCenter.defaultCenter addObserver:self
                                                selector:@selector(handleApplicationLifecyclePersist:)
@@ -2273,8 +2433,48 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
                                                  object:nil];
         [self configureRemoteCommands];
         [self updateRemoteCommandAvailability];
+        [self startDiagnosticsMonitorIfNeeded];
+        SonoraDiagnosticsLog(@"diag", [NSString stringWithFormat:@"log_file=%@", SonoraDiagnosticsLogFilePath()]);
     }
     return self;
+}
+
+- (void)startDiagnosticsMonitorIfNeeded {
+    if (self.diagnosticsTimer != nil) {
+        return;
+    }
+
+    NSTimer *timer = [NSTimer timerWithTimeInterval:30.0
+                                             target:self
+                                           selector:@selector(handleDiagnosticsTimerTick)
+                                           userInfo:nil
+                                            repeats:YES];
+    self.diagnosticsTimer = timer;
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+    [self handleDiagnosticsTimerTick];
+}
+
+- (void)handleDiagnosticsTimerTick {
+    uint64_t footprint = SonoraProcessPhysicalFootprintBytes();
+    double memoryMB = ((double)footprint) / (1024.0 * 1024.0);
+    double cpuPercent = SonoraProcessCPUUsagePercent();
+    NSString *mode = @"idle";
+    if (self.audioPlayer != nil) {
+        mode = @"audio";
+    } else if (self.streamingPlayer != nil) {
+        mode = @"stream";
+    } else if (self.placeholderPlaybackActive) {
+        mode = @"placeholder";
+    }
+
+    NSString *trackID = self.currentTrack.identifier ?: @"";
+    SonoraDiagnosticsLog(@"runtime", [NSString stringWithFormat:@"memory_mb=%.1f cpu_pct=%.2f mode=%@ playing=%d queue=%lu current_track=%@",
+                                      memoryMB,
+                                      cpuPercent,
+                                      mode,
+                                      self.isPlaying,
+                                      (unsigned long)self.queue.count,
+                                      trackID]);
 }
 
 - (nullable SonoraTrack *)currentTrack {
@@ -2284,17 +2484,126 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     return self.queue[self.currentIndex];
 }
 
+- (BOOL)isStreamingTrack:(SonoraTrack *)track {
+    if (track == nil || track.url == nil) {
+        return NO;
+    }
+    return !track.url.isFileURL;
+}
+
+- (NSTimeInterval)streamingCurrentTime {
+    if (self.streamingPlayer == nil) {
+        return 0.0;
+    }
+    NSTimeInterval value = CMTimeGetSeconds(self.streamingPlayer.currentTime);
+    if (!isfinite(value) || value < 0.0) {
+        return 0.0;
+    }
+    return value;
+}
+
+- (NSTimeInterval)streamingDuration {
+    if (self.streamingPlayer == nil || self.streamingPlayer.currentItem == nil) {
+        return 0.0;
+    }
+    NSTimeInterval value = CMTimeGetSeconds(self.streamingPlayer.currentItem.duration);
+    if (!isfinite(value) || value <= 0.0) {
+        NSArray<NSValue *> *seekableRanges = self.streamingPlayer.currentItem.seekableTimeRanges;
+        if (seekableRanges.count > 0) {
+            CMTimeRange range = seekableRanges.lastObject.CMTimeRangeValue;
+            NSTimeInterval seekableEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(range));
+            if (isfinite(seekableEnd) && seekableEnd > 0.0) {
+                value = seekableEnd;
+            }
+        }
+    }
+    if (!isfinite(value) || value < 0.0) {
+        return 0.0;
+    }
+    return value;
+}
+
+- (void)removeStreamingPlayerObservers {
+    if (self.streamTimeObserver != nil) {
+        [self.streamingPlayer removeTimeObserver:self.streamTimeObserver];
+        self.streamTimeObserver = nil;
+    }
+    if (self.streamEndObserver != nil) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.streamEndObserver];
+        self.streamEndObserver = nil;
+    }
+    if (self.streamFailedObserver != nil) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.streamFailedObserver];
+        self.streamFailedObserver = nil;
+    }
+}
+
+- (void)stopStreamingPlayer {
+    [self removeStreamingPlayerObservers];
+    [self.streamingPlayer pause];
+    self.streamingPlayer = nil;
+    self.streamSeekInFlight = NO;
+    self.streamSeekTargetTime = 0.0;
+    self.streamSeekStartedAt = 0.0;
+    self.streamSeekStartedAt = 0.0;
+}
+
+- (void)stopCurrentPlayers {
+    [self.audioPlayer stop];
+    self.audioPlayer = nil;
+    [self stopStreamingPlayer];
+}
+
 - (BOOL)isPlaying {
-    return self.audioPlayer.isPlaying;
+    if (self.audioPlayer != nil) {
+        return self.audioPlayer.isPlaying;
+    }
+    if (self.streamingPlayer != nil) {
+        return self.streamingPlayer.rate > 0.0;
+    }
+    return self.placeholderPlaybackActive && [self isPlaceholderTrack:self.currentTrack];
 }
 
 - (NSTimeInterval)currentTime {
-    return self.audioPlayer != nil ? self.audioPlayer.currentTime : 0.0;
+    if (self.audioPlayer != nil) {
+        return self.audioPlayer.currentTime;
+    }
+    if (self.streamingPlayer != nil) {
+        if (self.streamSeekInFlight) {
+            NSTimeInterval liveTime = [self streamingCurrentTime];
+            NSTimeInterval targetTime = MAX(0.0, self.streamSeekTargetTime);
+            NSTimeInterval distance = fabs(liveTime - targetTime);
+            NSTimeInterval elapsed = 0.0;
+            if (self.streamSeekStartedAt > 0.0) {
+                elapsed = [[NSDate date] timeIntervalSince1970] - self.streamSeekStartedAt;
+            }
+            BOOL reachedTarget = isfinite(distance) && distance <= 1.2;
+            BOOL seekTimedOut = elapsed >= 15.0;
+            if (reachedTarget || seekTimedOut) {
+                self.streamSeekInFlight = NO;
+                self.streamSeekTargetTime = 0.0;
+                self.streamSeekStartedAt = 0.0;
+                return liveTime;
+            }
+            return targetTime;
+        }
+        return [self streamingCurrentTime];
+    }
+    if (self.currentTrack != nil) {
+        return MAX(0.0, self.pendingRestoredTime);
+    }
+    return 0.0;
 }
 
 - (NSTimeInterval)duration {
     if (self.audioPlayer != nil) {
         return self.audioPlayer.duration;
+    }
+    if (self.streamingPlayer != nil) {
+        NSTimeInterval streamingDuration = [self streamingDuration];
+        if (isfinite(streamingDuration) && streamingDuration > 0.0) {
+            return streamingDuration;
+        }
     }
     SonoraTrack *track = self.currentTrack;
     return track != nil ? track.duration : 0.0;
@@ -2302,6 +2611,21 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 
 - (NSArray<SonoraTrack *> *)currentQueue {
     return self.queue;
+}
+
+- (BOOL)isPlaceholderTrack:(SonoraTrack *)track {
+    if (track == nil) {
+        return NO;
+    }
+    NSString *identifier = track.identifier ?: @"";
+    if (identifier.length == 0 || ![identifier hasPrefix:kMiniStreamingPlaceholderPrefix]) {
+        return NO;
+    }
+    if (track.url == nil || !track.url.isFileURL) {
+        return NO;
+    }
+    NSString *trackPath = track.url.path ?: @"";
+    return trackPath.length == 0 || [trackPath isEqualToString:@"/dev/null"];
 }
 
 - (void)invalidatePendingAutomaticAdvance {
@@ -2413,7 +2737,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    NSTimeInterval currentTime = (self.audioPlayer != nil) ? self.audioPlayer.currentTime : self.pendingRestoredTime;
+    NSTimeInterval currentTime = self.currentTime;
     if (!isfinite(currentTime) || currentTime < 0.0) {
         currentTime = 0.0;
     }
@@ -2439,12 +2763,12 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     }
 
     self.analyticsTrackID = track.identifier;
-    NSTimeInterval duration = self.audioPlayer != nil ? self.audioPlayer.duration : track.duration;
+    NSTimeInterval duration = self.duration;
     if (!isfinite(duration) || duration <= 0.0) {
         duration = track.duration;
     }
     self.analyticsTrackDuration = MAX(0.0, duration);
-    self.analyticsMaxProgressTime = MAX(0.0, self.audioPlayer.currentTime);
+    self.analyticsMaxProgressTime = MAX(0.0, self.currentTime);
     self.analyticsDidSeekNearEnd = NO;
 }
 
@@ -2453,7 +2777,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    NSTimeInterval currentTime = self.audioPlayer != nil ? self.audioPlayer.currentTime : 0.0;
+    NSTimeInterval currentTime = self.currentTime;
     if (isfinite(currentTime) && currentTime > self.analyticsMaxProgressTime) {
         self.analyticsMaxProgressTime = currentTime;
     }
@@ -2465,8 +2789,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     }
 
     NSTimeInterval duration = self.analyticsTrackDuration;
-    if ((!isfinite(duration) || duration <= 0.0) && self.audioPlayer != nil) {
-        duration = self.audioPlayer.duration;
+    if (!isfinite(duration) || duration <= 0.0) {
+        duration = self.duration;
     }
     if (!isfinite(duration) || duration <= 0.0) {
         return;
@@ -2488,8 +2812,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     [self updateAnalyticsProgressSnapshot];
 
     NSTimeInterval duration = self.analyticsTrackDuration;
-    if ((!isfinite(duration) || duration <= 0.0) && self.audioPlayer != nil) {
-        duration = self.audioPlayer.duration;
+    if (!isfinite(duration) || duration <= 0.0) {
+        duration = self.duration;
     }
     if (!isfinite(duration) || duration <= 0.0) {
         [self resetAnalyticsSession];
@@ -2532,6 +2856,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     [self resetAnalyticsSession];
     self.queue = [tracks copy];
     self.currentIndex = normalizedIndex;
+    self.placeholderPlaybackActive = NO;
 
     [self.shuffleBag removeAllObjects];
     [self.shuffleHistory removeAllObjects];
@@ -2548,7 +2873,14 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 
     [self invalidatePendingAutomaticAdvance];
 
-    if (self.audioPlayer == nil) {
+    if (self.audioPlayer == nil && self.streamingPlayer == nil) {
+        if ([self isPlaceholderTrack:self.currentTrack]) {
+            self.placeholderPlaybackActive = !self.placeholderPlaybackActive;
+            [self updateNowPlayingInfo];
+            [self postStateDidChange];
+            [self postProgressDidChange];
+            return;
+        }
         if (self.currentIndex == NSNotFound) {
             self.currentIndex = 0;
         }
@@ -2556,14 +2888,24 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    if (self.audioPlayer.isPlaying) {
+    if (self.audioPlayer != nil && self.audioPlayer.isPlaying) {
         [self.audioPlayer pause];
         [self.progressTimer invalidate];
         self.progressTimer = nil;
         self.currentMeterLevel = 0.0f;
         [self postMeterDidChangeWithLevel:0.0f];
+    } else if (self.streamingPlayer != nil && self.streamingPlayer.rate > 0.0f) {
+        [self.streamingPlayer pause];
+        [self.progressTimer invalidate];
+        self.progressTimer = nil;
+        self.currentMeterLevel = 0.0f;
+        [self postMeterDidChangeWithLevel:0.0f];
     } else {
-        [self.audioPlayer play];
+        if (self.audioPlayer != nil) {
+            [self.audioPlayer play];
+        } else if (self.streamingPlayer != nil) {
+            [self.streamingPlayer play];
+        }
         [self startProgressTimerIfNeeded];
     }
 
@@ -2584,7 +2926,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 
     [self invalidatePendingAutomaticAdvance];
 
-    if (self.audioPlayer != nil && self.audioPlayer.currentTime > 3.0) {
+    if ((self.audioPlayer != nil || self.streamingPlayer != nil) &&
+        self.currentTime > 3.0) {
         [self seekToTime:0.0];
         return;
     }
@@ -2634,15 +2977,54 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 }
 
 - (void)seekToTime:(NSTimeInterval)time {
-    if (self.audioPlayer == nil) {
+    SonoraTrack *track = self.currentTrack;
+    if (track == nil) {
+        return;
+    }
+
+    NSTimeInterval duration = self.duration;
+    NSTimeInterval clamped = MAX(0.0, time);
+    if (isfinite(duration) && duration > 0.0) {
+        clamped = MIN(clamped, duration);
+    }
+    self.pendingRestoredTrackID = track.identifier ?: @"";
+    self.pendingRestoredTime = clamped;
+
+    if (self.audioPlayer == nil && self.streamingPlayer == nil) {
+        [self updateNowPlayingInfo];
+        [self postProgressDidChange];
         return;
     }
 
     [self updateAnalyticsProgressSnapshot];
-    NSTimeInterval clamped = MAX(0.0, MIN(time, self.audioPlayer.duration));
     [self markSeekForAnalyticsToTime:clamped];
-    self.audioPlayer.currentTime = clamped;
-
+    if (self.audioPlayer != nil) {
+        self.audioPlayer.currentTime = clamped;
+    } else {
+        AVPlayerItem *currentItem = self.streamingPlayer.currentItem;
+        if (currentItem != nil) {
+            self.streamSeekInFlight = YES;
+            self.streamSeekTargetTime = clamped;
+            self.streamSeekStartedAt = [[NSDate date] timeIntervalSince1970];
+            __weak typeof(self) weakSelf = self;
+            [currentItem seekToTime:CMTimeMakeWithSeconds(clamped, NSEC_PER_SEC)
+                  completionHandler:^(BOOL finished) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    __strong typeof(weakSelf) strongSelf = weakSelf;
+                    if (strongSelf == nil || !strongSelf.streamSeekInFlight) {
+                        return;
+                    }
+                    if (!finished) {
+                        SonoraDiagnosticsLog(@"playback", [NSString stringWithFormat:@"stream_seek_failed track=%@ target=%.2f",
+                                                           strongSelf.currentTrack.identifier ?: @"",
+                                                           clamped]);
+                    }
+                    [strongSelf updateNowPlayingInfo];
+                    [strongSelf postProgressDidChange];
+                });
+            }];
+        }
+    }
     [self updateNowPlayingInfo];
     [self postProgressDidChange];
 }
@@ -2815,6 +3197,15 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         [self postProgressDidChange];
         return;
     }
+    if (self.streamingPlayer != nil) {
+        [self.streamingPlayer seekToTime:kCMTimeZero];
+        [self.streamingPlayer play];
+        [self startProgressTimerIfNeeded];
+        [self updateNowPlayingInfo];
+        [self postStateDidChange];
+        [self postProgressDidChange];
+        return;
+    }
 
     [self startCurrentTrack];
 }
@@ -2824,8 +3215,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     [self.progressTimer invalidate];
     self.progressTimer = nil;
 
-    [self.audioPlayer stop];
-    self.audioPlayer = nil;
+    [self stopCurrentPlayers];
+    self.placeholderPlaybackActive = NO;
     self.currentMeterLevel = 0.0f;
     [self postMeterDidChangeWithLevel:0.0f];
     [self resetAnalyticsSession];
@@ -2876,6 +3267,8 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 
 - (void)startCurrentTrack {
     [self invalidatePendingAutomaticAdvance];
+    self.streamSeekInFlight = NO;
+    self.streamSeekTargetTime = 0.0;
 
     if (self.currentIndex == NSNotFound && self.queue.count > 0) {
         self.currentIndex = 0;
@@ -2883,6 +3276,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 
     SonoraTrack *track = self.currentTrack;
     if (track == nil) {
+        self.placeholderPlaybackActive = NO;
         self.currentMeterLevel = 0.0f;
         [self postMeterDidChangeWithLevel:0.0f];
         [self resetAnalyticsSession];
@@ -2890,45 +3284,142 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    [self.audioPlayer stop];
-    self.audioPlayer = nil;
+    [self stopCurrentPlayers];
+    [self.progressTimer invalidate];
+    self.progressTimer = nil;
 
-    NSError *playerError = nil;
-    AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:track.url error:&playerError];
-    if (player == nil || playerError != nil) {
-        NSLog(@"Playback init failed: %@", playerError.localizedDescription);
-        [self.progressTimer invalidate];
-        self.progressTimer = nil;
+    if ([self isPlaceholderTrack:track]) {
+        self.placeholderPlaybackActive = YES;
         self.currentMeterLevel = 0.0f;
         [self postMeterDidChangeWithLevel:0.0f];
         [self resetAnalyticsSession];
+        [self updateRemoteCommandAvailability];
+        [self updateNowPlayingInfo];
+        [self postStateDidChange];
+        [self postProgressDidChange];
+        return;
+    }
+
+    if (![self isStreamingTrack:track]) {
+        NSError *playerError = nil;
+        AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:track.url error:&playerError];
+        if (player == nil || playerError != nil) {
+            NSLog(@"Playback init failed: %@", playerError.localizedDescription);
+            self.currentMeterLevel = 0.0f;
+            [self postMeterDidChangeWithLevel:0.0f];
+            [self resetAnalyticsSession];
+            self.placeholderPlaybackActive = NO;
+            [self updateRemoteCommandAvailability];
+            [self postStateDidChange];
+            return;
+        }
+
+        player.delegate = self;
+        player.meteringEnabled = YES;
+        player.volume = 1.0f;
+        [player prepareToPlay];
+
+        if (![player play]) {
+            NSLog(@"Playback start failed for %@", track.fileName);
+            [self resetAnalyticsSession];
+            self.placeholderPlaybackActive = NO;
+            [self updateRemoteCommandAvailability];
+            [self postStateDidChange];
+            return;
+        }
+
+        self.audioPlayer = player;
+        self.placeholderPlaybackActive = NO;
+        if (self.pendingRestoredTrackID.length > 0 &&
+            [self.pendingRestoredTrackID isEqualToString:track.identifier] &&
+            self.pendingRestoredTime > 0.0) {
+            player.currentTime = MIN(self.pendingRestoredTime, player.duration);
+        }
+        self.pendingRestoredTrackID = @"";
+        self.pendingRestoredTime = 0.0;
+        self.currentMeterLevel = 0.0f;
+        [self postMeterDidChangeWithLevel:0.0f];
+        [SonoraPlaybackHistoryStore.sharedStore recordTrackID:track.identifier];
+        [self beginAnalyticsSessionForCurrentTrack];
+
+        [self startProgressTimerIfNeeded];
+        [self updateNowPlayingInfo];
+        [self postStateDidChange];
+        [self postProgressDidChange];
+        return;
+    }
+
+    NSURL *streamURL = track.url;
+    NSString *streamScheme = [[(streamURL.scheme ?: @"") stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    BOOL streamURLIsValid = (streamURL != nil &&
+                             !streamURL.isFileURL &&
+                             streamScheme.length > 0 &&
+                             ([streamScheme isEqualToString:@"http"] || [streamScheme isEqualToString:@"https"]));
+    if (!streamURLIsValid) {
+        SonoraDiagnosticsLog(@"playback", [NSString stringWithFormat:@"stream_init_invalid_url track=%@ url=%@",
+                                           track.identifier ?: @"",
+                                           streamURL.absoluteString ?: @"<nil>"]);
+        [self resetAnalyticsSession];
+        self.placeholderPlaybackActive = NO;
         [self updateRemoteCommandAvailability];
         [self postStateDidChange];
         return;
     }
 
-    player.delegate = self;
-    player.meteringEnabled = YES;
-    player.volume = 1.0f;
-    [player prepareToPlay];
-
-    if (![player play]) {
-        NSLog(@"Playback start failed for %@", track.fileName);
-        [self.progressTimer invalidate];
-        self.progressTimer = nil;
-        self.currentMeterLevel = 0.0f;
-        [self postMeterDidChangeWithLevel:0.0f];
+    AVPlayerItem *streamItem = nil;
+    @try {
+        streamItem = [AVPlayerItem playerItemWithURL:streamURL];
+    } @catch (NSException *exception) {
+        SonoraDiagnosticsLog(@"playback", [NSString stringWithFormat:@"stream_init_exception track=%@ reason=%@",
+                                           track.identifier ?: @"",
+                                           exception.reason ?: @"unknown"]);
+    }
+    if (streamItem == nil) {
+        SonoraDiagnosticsLog(@"playback", [NSString stringWithFormat:@"stream_init_failed track=%@ url=%@",
+                                           track.identifier ?: @"",
+                                           streamURL.absoluteString ?: @"<nil>"]);
         [self resetAnalyticsSession];
+        self.placeholderPlaybackActive = NO;
         [self updateRemoteCommandAvailability];
         [self postStateDidChange];
         return;
     }
 
-    self.audioPlayer = player;
+    AVPlayer *streamingPlayer = [AVPlayer playerWithPlayerItem:streamItem];
+    __weak typeof(self) weakSelf = self;
+    id streamObserver = [NSNotificationCenter.defaultCenter addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                                                                       object:streamItem
+                                                                        queue:NSOperationQueue.mainQueue
+                                                                   usingBlock:^(NSNotification * _Nonnull note) {
+        (void)note;
+        [weakSelf handleStreamingPlayerDidFinish];
+    }];
+    id streamFailedObserver = [NSNotificationCenter.defaultCenter addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
+                                                                              object:streamItem
+                                                                               queue:NSOperationQueue.mainQueue
+                                                                          usingBlock:^(NSNotification * _Nonnull note) {
+        NSError *streamError = note.userInfo[AVPlayerItemFailedToPlayToEndTimeErrorKey];
+        SonoraDiagnosticsLog(@"playback", [NSString stringWithFormat:@"stream_failed track=%@ error=%@",
+                                           track.identifier ?: @"",
+                                           streamError.localizedDescription ?: @"unknown"]);
+        [weakSelf resetAnalyticsSession];
+        [weakSelf stopStreamingPlayer];
+        weakSelf.placeholderPlaybackActive = NO;
+        [weakSelf updateRemoteCommandAvailability];
+        [weakSelf updateNowPlayingInfo];
+        [weakSelf postStateDidChange];
+        [weakSelf postProgressDidChange];
+    }];
+    self.streamEndObserver = streamObserver;
+    self.streamFailedObserver = streamFailedObserver;
+    self.streamTimeObserver = nil;
+
+    self.streamingPlayer = streamingPlayer;
+    self.placeholderPlaybackActive = NO;
     if (self.pendingRestoredTrackID.length > 0 &&
         [self.pendingRestoredTrackID isEqualToString:track.identifier] &&
         self.pendingRestoredTime > 0.0) {
-        player.currentTime = MIN(self.pendingRestoredTime, player.duration);
+        [streamingPlayer seekToTime:CMTimeMakeWithSeconds(self.pendingRestoredTime, NSEC_PER_SEC)];
     }
     self.pendingRestoredTrackID = @"";
     self.pendingRestoredTime = 0.0;
@@ -2937,10 +3428,55 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
     [SonoraPlaybackHistoryStore.sharedStore recordTrackID:track.identifier];
     [self beginAnalyticsSessionForCurrentTrack];
 
+    if (@available(iOS 10.0, *)) {
+        streamingPlayer.automaticallyWaitsToMinimizeStalling = NO;
+        [streamingPlayer playImmediatelyAtRate:1.0f];
+    } else {
+        [streamingPlayer play];
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * (NSTimeInterval)NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.streamingPlayer != streamingPlayer) {
+            return;
+        }
+        if (streamingPlayer.rate > 0.0f) {
+            return;
+        }
+        NSError *itemError = streamingPlayer.currentItem.error;
+        AVPlayerItemStatus itemStatus = streamingPlayer.currentItem.status;
+        SonoraDiagnosticsLog(@"playback", [NSString stringWithFormat:@"stream_not_started track=%@ status=%ld rate=%.2f error=%@",
+                                           track.identifier ?: @"",
+                                           (long)itemStatus,
+                                           streamingPlayer.rate,
+                                           itemError.localizedDescription ?: @"none"]);
+    });
     [self startProgressTimerIfNeeded];
     [self updateNowPlayingInfo];
     [self postStateDidChange];
     [self postProgressDidChange];
+}
+
+- (void)handleStreamingPlayerDidFinish {
+    if (self.streamingPlayer == nil) {
+        return;
+    }
+    self.currentMeterLevel = 0.0f;
+    [self postMeterDidChangeWithLevel:0.0f];
+    NSTimeInterval gapSeconds = [self configuredTrackGapSeconds];
+    if (!isfinite(gapSeconds) || gapSeconds <= 0.01) {
+        [self advanceToNextTrackAutomatically:YES];
+        return;
+    }
+
+    NSUInteger requestToken = self.automaticAdvanceRequestToken + 1;
+    self.automaticAdvanceRequestToken = requestToken;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gapSeconds * (NSTimeInterval)NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.automaticAdvanceRequestToken != requestToken) {
+            return;
+        }
+        [self advanceToNextTrackAutomatically:YES];
+    });
 }
 
 - (void)startProgressTimerIfNeeded {
@@ -2953,15 +3489,20 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 }
 
 - (void)handleProgressTick {
-    if (self.audioPlayer == nil) {
+    if (self.audioPlayer == nil && self.streamingPlayer == nil) {
         return;
     }
 
-    [self.audioPlayer updateMeters];
-    float averagePower = [self.audioPlayer averagePowerForChannel:0];
-    float normalizedLevel = isfinite(averagePower) ? powf(10.0f, averagePower / 20.0f) : 0.0f;
-    self.currentMeterLevel = MIN(MAX(normalizedLevel, 0.0f), 1.0f);
-    [self postMeterDidChangeWithLevel:self.currentMeterLevel];
+    if (self.audioPlayer != nil) {
+        [self.audioPlayer updateMeters];
+        float averagePower = [self.audioPlayer averagePowerForChannel:0];
+        float normalizedLevel = isfinite(averagePower) ? powf(10.0f, averagePower / 20.0f) : 0.0f;
+        self.currentMeterLevel = MIN(MAX(normalizedLevel, 0.0f), 1.0f);
+        [self postMeterDidChangeWithLevel:self.currentMeterLevel];
+    } else {
+        self.currentMeterLevel = 0.0f;
+        [self postMeterDidChangeWithLevel:0.0f];
+    }
 
     [self updateAnalyticsProgressSnapshot];
     [self updateNowPlayingInfo];
@@ -3007,17 +3548,25 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 - (MPRemoteCommandHandlerStatus)handleRemotePlay:(MPRemoteCommandEvent *)event {
     (void)event;
 
-    if (self.audioPlayer != nil && !self.audioPlayer.isPlaying) {
+    if ((self.audioPlayer != nil || self.streamingPlayer != nil) && !self.isPlaying) {
         [self togglePlayPause];
         return MPRemoteCommandHandlerStatusSuccess;
     }
 
-    if (self.audioPlayer != nil) {
+    if (self.audioPlayer != nil || self.streamingPlayer != nil) {
         return MPRemoteCommandHandlerStatusSuccess;
     }
 
     if (self.queue.count == 0) {
         return MPRemoteCommandHandlerStatusNoSuchContent;
+    }
+
+    if ([self isPlaceholderTrack:self.currentTrack]) {
+        self.placeholderPlaybackActive = YES;
+        [self updateNowPlayingInfo];
+        [self postStateDidChange];
+        [self postProgressDidChange];
+        return MPRemoteCommandHandlerStatusSuccess;
     }
 
     if (self.currentIndex == NSNotFound) {
@@ -3031,11 +3580,23 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 - (MPRemoteCommandHandlerStatus)handleRemotePause:(MPRemoteCommandEvent *)event {
     (void)event;
 
-    if (self.audioPlayer == nil || !self.audioPlayer.isPlaying) {
-        return MPRemoteCommandHandlerStatusCommandFailed;
+    if (self.audioPlayer != nil || self.streamingPlayer != nil) {
+        if (self.isPlaying) {
+            [self togglePlayPause];
+        }
+        return MPRemoteCommandHandlerStatusSuccess;
     }
 
-    [self togglePlayPause];
+    if (self.queue.count == 0) {
+        return MPRemoteCommandHandlerStatusNoSuchContent;
+    }
+
+    if ([self isPlaceholderTrack:self.currentTrack]) {
+        self.placeholderPlaybackActive = NO;
+        [self updateNowPlayingInfo];
+        [self postStateDidChange];
+        [self postProgressDidChange];
+    }
     return MPRemoteCommandHandlerStatusSuccess;
 }
 
@@ -3062,13 +3623,17 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return MPRemoteCommandHandlerStatusCommandFailed;
     }
 
-    if (self.currentTrack == nil || self.duration <= 0.0) {
+    if (self.currentTrack == nil) {
         return MPRemoteCommandHandlerStatusNoSuchContent;
     }
 
     MPChangePlaybackPositionCommandEvent *positionEvent = (MPChangePlaybackPositionCommandEvent *)event;
-    NSTimeInterval targetTime = MAX(0.0, MIN(positionEvent.positionTime, self.duration));
-    if (self.audioPlayer != nil) {
+    NSTimeInterval maxDuration = self.duration;
+    NSTimeInterval targetTime = MAX(0.0, positionEvent.positionTime);
+    if (isfinite(maxDuration) && maxDuration > 0.0) {
+        targetTime = MIN(targetTime, maxDuration);
+    }
+    if (self.audioPlayer != nil || self.streamingPlayer != nil) {
         [self seekToTime:targetTime];
         return MPRemoteCommandHandlerStatusSuccess;
     }
@@ -3093,7 +3658,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         info[MPMediaItemPropertyArtist] = track.artist;
     }
     NSTimeInterval duration = self.duration;
-    NSTimeInterval elapsed = (self.audioPlayer != nil) ? self.audioPlayer.currentTime : self.pendingRestoredTime;
+    NSTimeInterval elapsed = self.currentTime;
     if (!isfinite(duration) || duration < 0.0) {
         duration = 0.0;
     }
@@ -3132,16 +3697,13 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 - (void)updateRemoteCommandAvailability {
     MPRemoteCommandCenter *center = MPRemoteCommandCenter.sharedCommandCenter;
     BOOL hasQueue = (self.queue.count > 0);
-    BOOL canStep = (self.queue.count > 1) || self.isShuffleEnabled || (self.repeatMode != SonoraRepeatModeNone);
-    BOOL canSeek = hasQueue && (self.duration > 0.0);
-
-    center.playCommand.enabled = hasQueue;
-    center.pauseCommand.enabled = hasQueue;
-    center.togglePlayPauseCommand.enabled = hasQueue;
-    center.nextTrackCommand.enabled = hasQueue && canStep;
-    center.previousTrackCommand.enabled = hasQueue && canStep;
+    center.playCommand.enabled = YES;
+    center.pauseCommand.enabled = YES;
+    center.togglePlayPauseCommand.enabled = YES;
+    center.nextTrackCommand.enabled = hasQueue;
+    center.previousTrackCommand.enabled = hasQueue;
     if (@available(iOS 9.1, *)) {
-        center.changePlaybackPositionCommand.enabled = hasQueue && canSeek;
+        center.changePlaybackPositionCommand.enabled = hasQueue;
     }
 }
 

@@ -17,6 +17,8 @@ FOUNDATION_EXTERN NSString * const SonoraPlaylistsDidChangeNotification;
 FOUNDATION_EXTERN NSString * const SonoraFavoritesDidChangeNotification;
 FOUNDATION_EXTERN NSString * const SonoraSleepTimerDidChangeNotification;
 FOUNDATION_EXTERN NSString * const SonoraPlayerSettingsDidChangeNotification;
+FOUNDATION_EXTERN void SonoraDiagnosticsLog(NSString *component, NSString *message);
+FOUNDATION_EXTERN NSString *SonoraDiagnosticsLogFilePath(void);
 
 typedef NS_ENUM(NSInteger, SonoraRepeatMode) {
     SonoraRepeatModeNone = 0,

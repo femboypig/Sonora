@@ -15,6 +15,8 @@
 			</array>
 		</dict>
 	</array>
+		<key>BACKEND_BASE_URL</key>
+		<string>https://api.corebrew.ru</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>YSMusic-HeadlineBold.ttf</string>
