@@ -16,6 +16,35 @@
 typedef void (^SonoraBootReadyHandler)(void);
 static const NSTimeInterval kSonoraBootMinimumDuration = 0.35;
 
+static void SonoraPerformDeferredBootWarmup(SonoraLibraryManager *library,
+                                            NSArray<SonoraTrack *> *tracks,
+                                            SonoraPlaylistStore *playlists,
+                                            NSArray<SonoraPlaylist *> *playlistSnapshot,
+                                            SonoraFavoritesStore *favorites) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @autoreleasepool {
+            [favorites favoriteTracksWithLibrary:library];
+
+            if (tracks.count > 0) {
+                NSMutableArray<NSString *> *trackIDs = [NSMutableArray arrayWithCapacity:tracks.count];
+                for (SonoraTrack *track in tracks) {
+                    if (track.identifier.length > 0) {
+                        [trackIDs addObject:track.identifier];
+                    }
+                }
+                if (trackIDs.count > 0) {
+                    [SonoraTrackAnalyticsStore.sharedStore analyticsByTrackIDForTrackIDs:trackIDs];
+                }
+            }
+
+            for (SonoraPlaylist *playlist in playlistSnapshot) {
+                [playlists tracksForPlaylist:playlist library:library];
+                [playlists coverForPlaylist:playlist library:library size:CGSizeMake(160.0, 160.0)];
+            }
+        }
+    });
+}
+
 static UIColor *SonoraBootBackgroundColor(void) {
     return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
         if (trait.userInterfaceStyle == UIUserInterfaceStyleDark) {
@@ -88,44 +117,28 @@ static UIImage *SonoraAppIconImage(UITraitCollection *traitCollection) {
 
             SonoraPlaylistStore *playlists = SonoraPlaylistStore.sharedStore;
             [playlists reloadPlaylists];
+            NSArray<SonoraPlaylist *> *playlistSnapshot = [playlists.playlists copy] ?: @[];
 
             SonoraFavoritesStore *favorites = SonoraFavoritesStore.sharedStore;
             [favorites favoriteTrackIDs];
-            [favorites favoriteTracksWithLibrary:library];
-
-            if (tracks.count > 0) {
-                NSMutableArray<NSString *> *trackIDs = [NSMutableArray arrayWithCapacity:tracks.count];
-                for (SonoraTrack *track in tracks) {
-                    if (track.identifier.length > 0) {
-                        [trackIDs addObject:track.identifier];
-                    }
-                }
-                if (trackIDs.count > 0) {
-                    [SonoraTrackAnalyticsStore.sharedStore analyticsByTrackIDForTrackIDs:trackIDs];
-                }
-            }
-
-            for (SonoraPlaylist *playlist in playlists.playlists) {
-                [playlists tracksForPlaylist:playlist library:library];
-                [playlists coverForPlaylist:playlist library:library size:CGSizeMake(160.0, 160.0)];
-            }
 
             (void)SonoraPlaybackManager.sharedManager;
             [SonoraWidgetBridge refreshSharedLovelyTracks];
-        }
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSTimeInterval elapsed = CFAbsoluteTimeGetCurrent() - self.bootStartTime;
-            NSTimeInterval remaining = MAX(0.0, kSonoraBootMinimumDuration - elapsed);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * (NSTimeInterval)NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                SonoraBootReadyHandler handler = self.readyHandler;
-                self.readyHandler = nil;
-                if (handler != nil) {
-                    handler();
-                }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSTimeInterval elapsed = CFAbsoluteTimeGetCurrent() - self.bootStartTime;
+                NSTimeInterval remaining = MAX(0.0, kSonoraBootMinimumDuration - elapsed);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * (NSTimeInterval)NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    SonoraBootReadyHandler handler = self.readyHandler;
+                    self.readyHandler = nil;
+                    if (handler != nil) {
+                        handler();
+                    }
+                    SonoraPerformDeferredBootWarmup(library, tracks, playlists, playlistSnapshot, favorites);
+                });
             });
-        });
+        }
     });
 }
 
