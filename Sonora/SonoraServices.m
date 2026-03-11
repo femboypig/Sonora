@@ -2087,6 +2087,9 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 #pragma mark - Track Analytics
 
 @interface SonoraTrackAnalyticsStore ()
+
+@property (nonatomic, strong, nullable) NSPersistentContainer *cachedPersistentContainer;
+
 @end
 
 @implementation SonoraTrackAnalyticsStore
@@ -2101,21 +2104,49 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 }
 
 - (nullable NSManagedObjectContext *)analyticsContext {
+    NSPersistentContainer *container = [self analyticsPersistentContainer];
+    if (container == nil) {
+        return nil;
+    }
+
+    NSManagedObjectContext *context = [container newBackgroundContext];
+    context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy;
+    context.undoManager = nil;
+    return context;
+}
+
+- (nullable NSPersistentContainer *)analyticsPersistentContainer {
+    @synchronized (self) {
+        if (self.cachedPersistentContainer != nil) {
+            return self.cachedPersistentContainer;
+        }
+    }
+
     __block id<UIApplicationDelegate> appDelegate = nil;
-    if (NSThread.isMainThread) {
+    void (^resolveDelegate)(void) = ^{
         appDelegate = UIApplication.sharedApplication.delegate;
+    };
+    if (NSThread.isMainThread) {
+        resolveDelegate();
     } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            appDelegate = UIApplication.sharedApplication.delegate;
-        });
+        dispatch_sync(dispatch_get_main_queue(), resolveDelegate);
     }
 
     if (![appDelegate isKindOfClass:AppDelegate.class]) {
         return nil;
     }
 
-    AppDelegate *typedDelegate = (AppDelegate *)appDelegate;
-    return typedDelegate.persistentContainer.viewContext;
+    NSPersistentContainer *container = ((AppDelegate *)appDelegate).persistentContainer;
+    if (container == nil) {
+        return nil;
+    }
+
+    @synchronized (self) {
+        if (self.cachedPersistentContainer == nil) {
+            self.cachedPersistentContainer = container;
+        }
+        return self.cachedPersistentContainer;
+    }
 }
 
 - (nullable NSManagedObject *)entryForTrackID:(NSString *)trackID
@@ -2170,7 +2201,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    [context performBlockAndWait:^{
+    [context performBlock:^{
         NSManagedObject *entry = [self entryForTrackID:trackID inContext:context createIfMiss:YES];
         if (entry == nil) {
             return;
@@ -2189,7 +2220,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    [context performBlockAndWait:^{
+    [context performBlock:^{
         NSManagedObject *entry = [self entryForTrackID:trackID inContext:context createIfMiss:YES];
         if (entry == nil) {
             return;
