@@ -1305,12 +1305,12 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         while (_backendBaseURL.length > 1 && [_backendBaseURL hasSuffix:@"/"]) {
             _backendBaseURL = [_backendBaseURL substringToIndex:_backendBaseURL.length - 1];
         }
-        _spotifyClientID = @"";
-        _spotifyClientSecret = @"";
-        _rapidAPIHost = @"";
-        _rapidAPIKey = @"";
-        _brokerRapidAPIHost = @"";
-        _brokerRapidAPIKey = @"";
+        _spotifyClientID = SonoraMiniStreamingConfigValue(@"SPOTIFY_CLIENT_ID", @"");
+        _spotifyClientSecret = SonoraMiniStreamingConfigValue(@"SPOTIFY_CLIENT_SECRET", @"");
+        _rapidAPIHost = SonoraMiniStreamingConfigValue(@"RAPIDAPI_HOST", SonoraMiniStreamingDefaultRapidAPIHost);
+        _rapidAPIKey = SonoraMiniStreamingConfigValue(@"RAPIDAPI_KEY", @"");
+        _brokerRapidAPIHost = SonoraMiniStreamingConfigValue(@"BROKER_RAPIDAPI_HOST", @"");
+        _brokerRapidAPIKey = SonoraMiniStreamingConfigValue(@"BROKER_RAPIDAPI_KEY", @"");
         _brokerCredentialFetchedAt = 0.0;
         _artistsSectionEnabled = YES;
         _spotifyAccessToken = @"";
@@ -1450,9 +1450,32 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
 - (void)fetchBrokerCredentialWithCompletion:(void (^)(NSString * _Nullable host, NSString * _Nullable key))completion {
     NSString *cachedHost = SonoraTrimmedStringValue(self.brokerRapidAPIHost);
     NSString *cachedKey = SonoraTrimmedStringValue(self.brokerRapidAPIKey);
+    if (cachedHost.length == 0) {
+        cachedHost = SonoraTrimmedStringValue(self.rapidAPIHost);
+    }
+    if (cachedKey.length == 0) {
+        cachedKey = SonoraTrimmedStringValue(self.rapidAPIKey);
+    }
     [self dispatchOnMainQueue:^{
         completion(cachedHost, cachedKey);
     }];
+}
+
+- (BOOL)canUseSpotifyFallback {
+    return (SonoraTrimmedStringValue(self.spotifyClientID).length > 0 &&
+            SonoraTrimmedStringValue(self.spotifyClientSecret).length > 0);
+}
+
+- (BOOL)canUseRapidResolveFallback {
+    NSString *cachedHost = SonoraTrimmedStringValue(self.brokerRapidAPIHost);
+    if (cachedHost.length == 0) {
+        cachedHost = SonoraTrimmedStringValue(self.rapidAPIHost);
+    }
+    NSString *cachedKey = SonoraTrimmedStringValue(self.brokerRapidAPIKey);
+    if (cachedKey.length == 0) {
+        cachedKey = SonoraTrimmedStringValue(self.rapidAPIKey);
+    }
+    return (cachedHost.length > 0 && cachedKey.length > 0);
 }
 
 - (void)fetchSpotifyAccessTokenWithCompletion:(void (^)(NSString * _Nullable token, NSError * _Nullable error))completion {
@@ -1608,29 +1631,185 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         return;
     }
 
-    if (![self isConfigured]) {
-        [self dispatchOnMainQueue:^{
-            completion(@[], SonoraMiniStreamingError(1101, @"Mini streaming backend is missing."));
-        }];
-        return;
-    }
-
     if (self.currentSearchTask != nil) {
         [self.currentSearchTask cancel];
         self.currentSearchTask = nil;
     }
 
     NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
+    BOOL canUseSpotifyFallback = [self canUseSpotifyFallback];
+    __weak typeof(self) weakSelf = self;
+    void (^startSpotifyFallback)(void) = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil) {
+                return;
+            }
+
+            if (tokenError != nil || token.length == 0) {
+                [innerSelf dispatchOnMainQueue:^{
+                    completion(@[], tokenError ?: SonoraMiniStreamingError(1102, @"Cannot fetch Spotify token."));
+                }];
+                return;
+            }
+
+            NSURLComponents *components = [NSURLComponents componentsWithString:SonoraMiniStreamingSpotifySearchURLString];
+            components.queryItems = @[
+                [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
+                [NSURLQueryItem queryItemWithName:@"type" value:@"track"],
+                [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
+            ];
+
+            NSURL *searchURL = components.URL;
+            if (searchURL == nil) {
+                [innerSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1103, @"Spotify search URL is invalid."));
+                }];
+                return;
+            }
+
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:searchURL];
+            request.HTTPMethod = @"GET";
+            request.timeoutInterval = 20.0;
+            [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+            innerSelf.currentSearchTask = [innerSelf.session dataTaskWithRequest:request
+                                                               completionHandler:^(NSData * _Nullable data,
+                                                                                   NSURLResponse * _Nullable response,
+                                                                                   NSError * _Nullable error) {
+                if (error != nil) {
+                    if (error.code == NSURLErrorCancelled) {
+                        return;
+                    }
+                    [innerSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1104, error.localizedDescription));
+                    }];
+                    return;
+                }
+
+                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                NSInteger statusCode = http.statusCode;
+                NSDictionary *json = nil;
+                if (data.length > 0) {
+                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([object isKindOfClass:NSDictionary.class]) {
+                        json = (NSDictionary *)object;
+                    }
+                }
+
+                if (statusCode < 200 || statusCode >= 300) {
+                    NSString *message = nil;
+                    id errorNode = json[@"error"];
+                    if ([errorNode isKindOfClass:NSDictionary.class]) {
+                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                    }
+                    if (message.length == 0) {
+                        message = [NSString stringWithFormat:@"Spotify search failed (%ld).", (long)statusCode];
+                    }
+                    [innerSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1105, message));
+                    }];
+                    return;
+                }
+
+                NSDictionary *payloadNode = [innerSelf miniStreamingPayloadNodeFromJSON:json ?: @{}];
+                id artistsFlagValue = payloadNode[@"artistsEnabled"];
+                if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
+                    artistsFlagValue = payloadNode[@"showArtists"];
+                }
+                if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
+                    id artistsNode = payloadNode[@"artists"];
+                    if (![artistsNode isKindOfClass:NSDictionary.class] && ![artistsNode isKindOfClass:NSArray.class]) {
+                        artistsFlagValue = artistsNode;
+                    }
+                }
+                if ((artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) &&
+                    [json isKindOfClass:NSDictionary.class]) {
+                    artistsFlagValue = json[@"artistsEnabled"];
+                    if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
+                        artistsFlagValue = json[@"showArtists"];
+                    }
+                    if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
+                        id artistsNode = json[@"artists"];
+                        if (![artistsNode isKindOfClass:NSDictionary.class] && ![artistsNode isKindOfClass:NSArray.class]) {
+                            artistsFlagValue = artistsNode;
+                        }
+                    }
+                }
+
+                BOOL hasArtistsFlag = NO;
+                BOOL artistsEnabled = innerSelf.artistsSectionEnabled;
+                if ([artistsFlagValue respondsToSelector:@selector(boolValue)] &&
+                    ![artistsFlagValue isKindOfClass:NSString.class]) {
+                    hasArtistsFlag = YES;
+                    artistsEnabled = [artistsFlagValue boolValue];
+                } else if ([artistsFlagValue isKindOfClass:NSString.class]) {
+                    NSString *normalizedArtistsFlag = SonoraTrimmedStringValue(artistsFlagValue).lowercaseString;
+                    if (normalizedArtistsFlag.length > 0) {
+                        if ([normalizedArtistsFlag isEqualToString:@"no"] ||
+                            [normalizedArtistsFlag isEqualToString:@"false"] ||
+                            [normalizedArtistsFlag isEqualToString:@"off"] ||
+                            [normalizedArtistsFlag isEqualToString:@"0"] ||
+                            [normalizedArtistsFlag isEqualToString:@"disabled"] ||
+                            [normalizedArtistsFlag isEqualToString:@"hide"] ||
+                            [normalizedArtistsFlag isEqualToString:@"hidden"]) {
+                            hasArtistsFlag = YES;
+                            artistsEnabled = NO;
+                        } else if ([normalizedArtistsFlag isEqualToString:@"yes"] ||
+                                   [normalizedArtistsFlag isEqualToString:@"true"] ||
+                                   [normalizedArtistsFlag isEqualToString:@"on"] ||
+                                   [normalizedArtistsFlag isEqualToString:@"1"] ||
+                                   [normalizedArtistsFlag isEqualToString:@"enabled"] ||
+                                   [normalizedArtistsFlag isEqualToString:@"show"] ||
+                                   [normalizedArtistsFlag isEqualToString:@"visible"]) {
+                            hasArtistsFlag = YES;
+                            artistsEnabled = YES;
+                        }
+                    }
+                }
+                if (hasArtistsFlag) {
+                    innerSelf.artistsSectionEnabled = artistsEnabled;
+                }
+
+                NSDictionary *tracksNode = [json[@"tracks"] isKindOfClass:NSDictionary.class] ? json[@"tracks"] : nil;
+                NSArray *items = [tracksNode[@"items"] isKindOfClass:NSArray.class] ? tracksNode[@"items"] : @[];
+                NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray arrayWithCapacity:items.count];
+                for (id itemObject in items) {
+                    SonoraMiniStreamingTrack *track = [innerSelf miniStreamingTrackFromSpotifyItem:itemObject];
+                    if (track != nil) {
+                        [results addObject:track];
+                    }
+                }
+
+                [innerSelf dispatchOnMainQueue:^{
+                    completion([results copy], nil);
+                }];
+            }];
+            [innerSelf.currentSearchTask resume];
+        }];
+    };
+
     NSURL *backendSearchURL = [self miniStreamingBackendURLForPath:SonoraMiniStreamingBackendSearchPath
                                                          queryItems:@[
         [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
         [NSURLQueryItem queryItemWithName:@"type" value:@"track"],
         [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
     ]];
-    if (backendSearchURL == nil) {
-        [self dispatchOnMainQueue:^{
-            completion(@[], SonoraMiniStreamingError(1103, @"Mini streaming backend URL is invalid."));
-        }];
+    if (![self isConfigured] || backendSearchURL == nil) {
+        if (canUseSpotifyFallback) {
+            startSpotifyFallback();
+        } else {
+            NSInteger errorCode = [self isConfigured] ? 1103 : 1101;
+            NSString *message = [self isConfigured] ? @"Mini streaming backend URL is invalid." : @"Mini streaming backend is missing.";
+            [self dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(errorCode, message));
+            }];
+        }
         return;
     }
 
@@ -1653,9 +1832,13 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
             if (error.code == NSURLErrorCancelled) {
                 return;
             }
-            [strongBackendSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1104, error.localizedDescription));
-            }];
+            if (canUseSpotifyFallback) {
+                startSpotifyFallback();
+            } else {
+                [strongBackendSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1104, error.localizedDescription));
+                }];
+            }
             return;
         }
 
@@ -1670,15 +1853,19 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         }
 
         if (statusCode < 200 || statusCode >= 300) {
-            NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
-            if (statusCode == 451) {
-                message = @"Требуется VPN из-за региональных ограничений (451).";
-            } else if (message.length == 0) {
-                message = [NSString stringWithFormat:@"Mini streaming search failed (%ld).", (long)statusCode];
+            if (canUseSpotifyFallback) {
+                startSpotifyFallback();
+            } else {
+                NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
+                if (statusCode == 451) {
+                    message = @"Требуется VPN из-за региональных ограничений (451).";
+                } else if (message.length == 0) {
+                    message = [NSString stringWithFormat:@"Mini streaming search failed (%ld).", (long)statusCode];
+                }
+                [strongBackendSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1105, message));
+                }];
             }
-            [strongBackendSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1105, message));
-            }];
             return;
         }
 
@@ -1698,158 +1885,6 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         }];
     }];
     [self.currentSearchTask resume];
-    return;
-
-    __weak typeof(self) weakSelf = self;
-    [self fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            return;
-        }
-
-        if (tokenError != nil || token.length == 0) {
-            [strongSelf dispatchOnMainQueue:^{
-                completion(@[], tokenError ?: SonoraMiniStreamingError(1102, @"Cannot fetch Spotify token."));
-            }];
-            return;
-        }
-
-        NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
-        NSURLComponents *components = [NSURLComponents componentsWithString:SonoraMiniStreamingSpotifySearchURLString];
-        components.queryItems = @[
-            [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
-            [NSURLQueryItem queryItemWithName:@"type" value:@"track"],
-            [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
-        ];
-
-        NSURL *searchURL = components.URL;
-        if (searchURL == nil) {
-            [strongSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1103, @"Spotify search URL is invalid."));
-            }];
-            return;
-        }
-
-        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:searchURL];
-        request.HTTPMethod = @"GET";
-        request.timeoutInterval = 20.0;
-        [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
-
-        strongSelf.currentSearchTask = [strongSelf.session dataTaskWithRequest:request
-                                                              completionHandler:^(NSData * _Nullable data,
-                                                                                  NSURLResponse * _Nullable response,
-                                                                                  NSError * _Nullable error) {
-            if (error != nil) {
-                if (error.code == NSURLErrorCancelled) {
-                    return;
-                }
-                [strongSelf dispatchOnMainQueue:^{
-                    completion(@[], SonoraMiniStreamingError(1104, error.localizedDescription));
-                }];
-                return;
-            }
-
-            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-            NSInteger statusCode = http.statusCode;
-            NSDictionary *json = nil;
-            if (data.length > 0) {
-                id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if ([object isKindOfClass:NSDictionary.class]) {
-                    json = (NSDictionary *)object;
-                }
-            }
-
-            if (statusCode < 200 || statusCode >= 300) {
-                NSString *message = nil;
-                id errorNode = json[@"error"];
-                if ([errorNode isKindOfClass:NSDictionary.class]) {
-                    message = SonoraTrimmedStringValue(errorNode[@"message"]);
-                }
-                if (message.length == 0) {
-                    message = [NSString stringWithFormat:@"Spotify search failed (%ld).", (long)statusCode];
-                }
-                [strongSelf dispatchOnMainQueue:^{
-                    completion(@[], SonoraMiniStreamingError(1105, message));
-                }];
-                return;
-            }
-
-            NSDictionary *payloadNode = [strongSelf miniStreamingPayloadNodeFromJSON:json ?: @{}];
-            id artistsFlagValue = payloadNode[@"artistsEnabled"];
-            if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
-                artistsFlagValue = payloadNode[@"showArtists"];
-            }
-            if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
-                id artistsNode = payloadNode[@"artists"];
-                if (![artistsNode isKindOfClass:NSDictionary.class] && ![artistsNode isKindOfClass:NSArray.class]) {
-                    artistsFlagValue = artistsNode;
-                }
-            }
-            if ((artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) &&
-                [json isKindOfClass:NSDictionary.class]) {
-                artistsFlagValue = json[@"artistsEnabled"];
-                if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
-                    artistsFlagValue = json[@"showArtists"];
-                }
-                if (artistsFlagValue == nil || [artistsFlagValue isKindOfClass:NSNull.class]) {
-                    id artistsNode = json[@"artists"];
-                    if (![artistsNode isKindOfClass:NSDictionary.class] && ![artistsNode isKindOfClass:NSArray.class]) {
-                        artistsFlagValue = artistsNode;
-                    }
-                }
-            }
-
-            BOOL hasArtistsFlag = NO;
-            BOOL artistsEnabled = strongSelf.artistsSectionEnabled;
-            if ([artistsFlagValue respondsToSelector:@selector(boolValue)] &&
-                ![artistsFlagValue isKindOfClass:NSString.class]) {
-                hasArtistsFlag = YES;
-                artistsEnabled = [artistsFlagValue boolValue];
-            } else if ([artistsFlagValue isKindOfClass:NSString.class]) {
-                NSString *normalizedArtistsFlag = SonoraTrimmedStringValue(artistsFlagValue).lowercaseString;
-                if (normalizedArtistsFlag.length > 0) {
-                    if ([normalizedArtistsFlag isEqualToString:@"no"] ||
-                        [normalizedArtistsFlag isEqualToString:@"false"] ||
-                        [normalizedArtistsFlag isEqualToString:@"off"] ||
-                        [normalizedArtistsFlag isEqualToString:@"0"] ||
-                        [normalizedArtistsFlag isEqualToString:@"disabled"] ||
-                        [normalizedArtistsFlag isEqualToString:@"hide"] ||
-                        [normalizedArtistsFlag isEqualToString:@"hidden"]) {
-                        hasArtistsFlag = YES;
-                        artistsEnabled = NO;
-                    } else if ([normalizedArtistsFlag isEqualToString:@"yes"] ||
-                               [normalizedArtistsFlag isEqualToString:@"true"] ||
-                               [normalizedArtistsFlag isEqualToString:@"on"] ||
-                               [normalizedArtistsFlag isEqualToString:@"1"] ||
-                               [normalizedArtistsFlag isEqualToString:@"enabled"] ||
-                               [normalizedArtistsFlag isEqualToString:@"show"] ||
-                               [normalizedArtistsFlag isEqualToString:@"visible"]) {
-                        hasArtistsFlag = YES;
-                        artistsEnabled = YES;
-                    }
-                }
-            }
-            if (hasArtistsFlag) {
-                strongSelf.artistsSectionEnabled = artistsEnabled;
-            }
-
-            NSDictionary *tracksNode = [json[@"tracks"] isKindOfClass:NSDictionary.class] ? json[@"tracks"] : nil;
-            NSArray *items = [tracksNode[@"items"] isKindOfClass:NSArray.class] ? tracksNode[@"items"] : @[];
-            NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray arrayWithCapacity:items.count];
-
-            for (id itemObject in items) {
-                SonoraMiniStreamingTrack *track = [strongSelf miniStreamingTrackFromSpotifyItem:itemObject];
-                if (track != nil) {
-                    [results addObject:track];
-                }
-            }
-
-            [strongSelf dispatchOnMainQueue:^{
-                completion([results copy], nil);
-            }];
-        }];
-        [strongSelf.currentSearchTask resume];
-    }];
 }
 
 - (void)searchArtists:(NSString *)query
@@ -1863,29 +1898,160 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         return;
     }
 
-    if (![self isConfigured]) {
-        [self dispatchOnMainQueue:^{
-            completion(@[], SonoraMiniStreamingError(1111, @"Mini streaming backend is missing."));
-        }];
-        return;
-    }
-
     if (self.currentArtistSearchTask != nil) {
         [self.currentArtistSearchTask cancel];
         self.currentArtistSearchTask = nil;
     }
 
     NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
+    BOOL canUseSpotifyFallback = [self canUseSpotifyFallback];
+    __weak typeof(self) weakSelf = self;
+    void (^startSpotifyFallback)(void) = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil) {
+                return;
+            }
+
+            if (tokenError != nil || token.length == 0) {
+                [innerSelf dispatchOnMainQueue:^{
+                    completion(@[], tokenError ?: SonoraMiniStreamingError(1112, @"Cannot fetch Spotify token."));
+                }];
+                return;
+            }
+
+            NSURLComponents *components = [NSURLComponents componentsWithString:SonoraMiniStreamingSpotifySearchURLString];
+            components.queryItems = @[
+                [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
+                [NSURLQueryItem queryItemWithName:@"type" value:@"artist"],
+                [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
+            ];
+
+            NSURL *searchURL = components.URL;
+            if (searchURL == nil) {
+                [innerSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1113, @"Spotify artist search URL is invalid."));
+                }];
+                return;
+            }
+
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:searchURL];
+            request.HTTPMethod = @"GET";
+            request.timeoutInterval = 20.0;
+            [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+            innerSelf.currentArtistSearchTask = [innerSelf.session dataTaskWithRequest:request
+                                                                     completionHandler:^(NSData * _Nullable data,
+                                                                                         NSURLResponse * _Nullable response,
+                                                                                         NSError * _Nullable error) {
+                if (error != nil) {
+                    if (error.code == NSURLErrorCancelled) {
+                        return;
+                    }
+                    [innerSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1114, error.localizedDescription));
+                    }];
+                    return;
+                }
+
+                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                NSInteger statusCode = http.statusCode;
+                NSDictionary *json = nil;
+                if (data.length > 0) {
+                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([object isKindOfClass:NSDictionary.class]) {
+                        json = (NSDictionary *)object;
+                    }
+                }
+
+                if (statusCode < 200 || statusCode >= 300) {
+                    NSString *message = nil;
+                    id errorNode = json[@"error"];
+                    if ([errorNode isKindOfClass:NSDictionary.class]) {
+                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                    }
+                    if (message.length == 0) {
+                        message = [NSString stringWithFormat:@"Spotify artist search failed (%ld).", (long)statusCode];
+                    }
+                    [innerSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1115, message));
+                    }];
+                    return;
+                }
+
+                NSDictionary *artistsNode = [json[@"artists"] isKindOfClass:NSDictionary.class] ? json[@"artists"] : nil;
+                NSArray *items = [artistsNode[@"items"] isKindOfClass:NSArray.class] ? artistsNode[@"items"] : @[];
+                NSMutableArray<SonoraMiniStreamingArtist *> *results = [NSMutableArray arrayWithCapacity:items.count];
+                for (id itemObject in items) {
+                    if (![itemObject isKindOfClass:NSDictionary.class]) {
+                        continue;
+                    }
+                    NSDictionary *item = (NSDictionary *)itemObject;
+                    NSString *artistID = SonoraTrimmedStringValue(item[@"id"]);
+                    if (artistID.length == 0) {
+                        continue;
+                    }
+
+                    SonoraMiniStreamingArtist *artist = [[SonoraMiniStreamingArtist alloc] init];
+                    artist.artistID = artistID;
+                    artist.name = SonoraTrimmedStringValue(item[@"name"]);
+                    if (artist.name.length == 0) {
+                        artist.name = @"Unknown artist";
+                    }
+
+                    NSArray *images = [item[@"images"] isKindOfClass:NSArray.class] ? item[@"images"] : @[];
+                    NSString *artworkURL = @"";
+                    NSInteger bestWidth = -1;
+                    for (id imageObject in images) {
+                        if (![imageObject isKindOfClass:NSDictionary.class]) {
+                            continue;
+                        }
+                        NSDictionary *imageNode = (NSDictionary *)imageObject;
+                        NSString *candidateURL = SonoraTrimmedStringValue(imageNode[@"url"]);
+                        if (candidateURL.length == 0) {
+                            continue;
+                        }
+                        NSInteger width = [imageNode[@"width"] respondsToSelector:@selector(integerValue)] ? [imageNode[@"width"] integerValue] : 0;
+                        if (width > bestWidth) {
+                            bestWidth = width;
+                            artworkURL = candidateURL;
+                        } else if (bestWidth < 0 && artworkURL.length == 0) {
+                            artworkURL = candidateURL;
+                        }
+                    }
+                    artist.artworkURL = artworkURL ?: @"";
+                    [results addObject:artist];
+                }
+
+                [innerSelf dispatchOnMainQueue:^{
+                    completion([results copy], nil);
+                }];
+            }];
+            [innerSelf.currentArtistSearchTask resume];
+        }];
+    };
+
     NSURL *backendSearchURL = [self miniStreamingBackendURLForPath:SonoraMiniStreamingBackendSearchPath
                                                          queryItems:@[
         [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
         [NSURLQueryItem queryItemWithName:@"type" value:@"artist"],
         [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
     ]];
-    if (backendSearchURL == nil) {
-        [self dispatchOnMainQueue:^{
-            completion(@[], SonoraMiniStreamingError(1113, @"Mini streaming backend URL is invalid."));
-        }];
+    if (![self isConfigured] || backendSearchURL == nil) {
+        if (canUseSpotifyFallback) {
+            startSpotifyFallback();
+        } else {
+            NSInteger errorCode = [self isConfigured] ? 1113 : 1111;
+            NSString *message = [self isConfigured] ? @"Mini streaming backend URL is invalid." : @"Mini streaming backend is missing.";
+            [self dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(errorCode, message));
+            }];
+        }
         return;
     }
 
@@ -1908,9 +2074,13 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
             if (error.code == NSURLErrorCancelled) {
                 return;
             }
-            [strongBackendSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1114, error.localizedDescription));
-            }];
+            if (canUseSpotifyFallback) {
+                startSpotifyFallback();
+            } else {
+                [strongBackendSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1114, error.localizedDescription));
+                }];
+            }
             return;
         }
 
@@ -1925,15 +2095,19 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         }
 
         if (statusCode < 200 || statusCode >= 300) {
-            NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
-            if (statusCode == 451) {
-                message = @"Требуется VPN из-за региональных ограничений (451).";
-            } else if (message.length == 0) {
-                message = [NSString stringWithFormat:@"Mini streaming artist search failed (%ld).", (long)statusCode];
+            if (canUseSpotifyFallback) {
+                startSpotifyFallback();
+            } else {
+                NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
+                if (statusCode == 451) {
+                    message = @"Требуется VPN из-за региональных ограничений (451).";
+                } else if (message.length == 0) {
+                    message = [NSString stringWithFormat:@"Mini streaming artist search failed (%ld).", (long)statusCode];
+                }
+                [strongBackendSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1115, message));
+                }];
             }
-            [strongBackendSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1115, message));
-            }];
             return;
         }
 
@@ -2045,132 +2219,6 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         }];
     }];
     [self.currentArtistSearchTask resume];
-    return;
-
-    __weak typeof(self) weakSelf = self;
-    [self fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            return;
-        }
-
-        if (tokenError != nil || token.length == 0) {
-            [strongSelf dispatchOnMainQueue:^{
-                completion(@[], tokenError ?: SonoraMiniStreamingError(1112, @"Cannot fetch Spotify token."));
-            }];
-            return;
-        }
-
-        NSUInteger boundedLimit = MIN(MAX(limit, (NSUInteger)1), (NSUInteger)50);
-        NSURLComponents *components = [NSURLComponents componentsWithString:SonoraMiniStreamingSpotifySearchURLString];
-        components.queryItems = @[
-            [NSURLQueryItem queryItemWithName:@"q" value:normalizedQuery],
-            [NSURLQueryItem queryItemWithName:@"type" value:@"artist"],
-            [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
-        ];
-
-        NSURL *searchURL = components.URL;
-        if (searchURL == nil) {
-            [strongSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1113, @"Spotify artist search URL is invalid."));
-            }];
-            return;
-        }
-
-        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:searchURL];
-        request.HTTPMethod = @"GET";
-        request.timeoutInterval = 20.0;
-        [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
-
-        strongSelf.currentArtistSearchTask = [strongSelf.session dataTaskWithRequest:request
-                                                                    completionHandler:^(NSData * _Nullable data,
-                                                                                        NSURLResponse * _Nullable response,
-                                                                                        NSError * _Nullable error) {
-            if (error != nil) {
-                if (error.code == NSURLErrorCancelled) {
-                    return;
-                }
-                [strongSelf dispatchOnMainQueue:^{
-                    completion(@[], SonoraMiniStreamingError(1114, error.localizedDescription));
-                }];
-                return;
-            }
-
-            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-            NSInteger statusCode = http.statusCode;
-            NSDictionary *json = nil;
-            if (data.length > 0) {
-                id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if ([object isKindOfClass:NSDictionary.class]) {
-                    json = (NSDictionary *)object;
-                }
-            }
-
-            if (statusCode < 200 || statusCode >= 300) {
-                NSString *message = nil;
-                id errorNode = json[@"error"];
-                if ([errorNode isKindOfClass:NSDictionary.class]) {
-                    message = SonoraTrimmedStringValue(errorNode[@"message"]);
-                }
-                if (message.length == 0) {
-                    message = [NSString stringWithFormat:@"Spotify artist search failed (%ld).", (long)statusCode];
-                }
-                [strongSelf dispatchOnMainQueue:^{
-                    completion(@[], SonoraMiniStreamingError(1115, message));
-                }];
-                return;
-            }
-
-            NSDictionary *artistsNode = [json[@"artists"] isKindOfClass:NSDictionary.class] ? json[@"artists"] : nil;
-            NSArray *items = [artistsNode[@"items"] isKindOfClass:NSArray.class] ? artistsNode[@"items"] : @[];
-            NSMutableArray<SonoraMiniStreamingArtist *> *results = [NSMutableArray arrayWithCapacity:items.count];
-            for (id itemObject in items) {
-                if (![itemObject isKindOfClass:NSDictionary.class]) {
-                    continue;
-                }
-                NSDictionary *item = (NSDictionary *)itemObject;
-                NSString *artistID = SonoraTrimmedStringValue(item[@"id"]);
-                if (artistID.length == 0) {
-                    continue;
-                }
-
-                SonoraMiniStreamingArtist *artist = [[SonoraMiniStreamingArtist alloc] init];
-                artist.artistID = artistID;
-                artist.name = SonoraTrimmedStringValue(item[@"name"]);
-                if (artist.name.length == 0) {
-                    artist.name = @"Unknown artist";
-                }
-
-                NSArray *images = [item[@"images"] isKindOfClass:NSArray.class] ? item[@"images"] : @[];
-                NSString *artworkURL = @"";
-                NSInteger bestWidth = -1;
-                for (id imageObject in images) {
-                    if (![imageObject isKindOfClass:NSDictionary.class]) {
-                        continue;
-                    }
-                    NSDictionary *imageNode = (NSDictionary *)imageObject;
-                    NSString *candidateURL = SonoraTrimmedStringValue(imageNode[@"url"]);
-                    if (candidateURL.length == 0) {
-                        continue;
-                    }
-                    NSInteger width = [imageNode[@"width"] respondsToSelector:@selector(integerValue)] ? [imageNode[@"width"] integerValue] : 0;
-                    if (width > bestWidth) {
-                        bestWidth = width;
-                        artworkURL = candidateURL;
-                    } else if (bestWidth < 0 && artworkURL.length == 0) {
-                        artworkURL = candidateURL;
-                    }
-                }
-                artist.artworkURL = artworkURL ?: @"";
-                [results addObject:artist];
-            }
-
-            [strongSelf dispatchOnMainQueue:^{
-                completion([results copy], nil);
-            }];
-        }];
-        [strongSelf.currentArtistSearchTask resume];
-    }];
 }
 
 - (void)fetchTopTracksForArtistID:(NSString *)artistID
@@ -2184,29 +2232,125 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         return;
     }
 
-    if (![self isConfigured]) {
-        [self dispatchOnMainQueue:^{
-            completion(@[], SonoraMiniStreamingError(1122, @"Mini streaming backend is missing."));
-        }];
-        return;
-    }
-
     if (self.currentArtistTopTracksTask != nil) {
         [self.currentArtistTopTracksTask cancel];
         self.currentArtistTopTracksTask = nil;
     }
 
     NSUInteger boundedLimit = (limit == 0 || limit == NSUIntegerMax) ? 100 : MIN(MAX(limit, (NSUInteger)1), (NSUInteger)100);
+    BOOL canUseSpotifyFallback = [self canUseSpotifyFallback];
+    __weak typeof(self) weakSelf = self;
+    void (^startSpotifyFallback)(void) = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil) {
+                return;
+            }
+
+            if (tokenError != nil || token.length == 0) {
+                [innerSelf dispatchOnMainQueue:^{
+                    completion(@[], tokenError ?: SonoraMiniStreamingError(1123, @"Cannot fetch Spotify token."));
+                }];
+                return;
+            }
+
+            NSString *encodedFallbackArtistID = [normalizedArtistID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
+            NSString *fallbackURLString = [NSString stringWithFormat:@"https://api.spotify.com/v1/artists/%@/top-tracks?market=US",
+                                           encodedFallbackArtistID ?: @""];
+            NSURL *fallbackURL = [NSURL URLWithString:fallbackURLString];
+            if (fallbackURL == nil) {
+                [innerSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1124, @"Spotify top tracks URL is invalid."));
+                }];
+                return;
+            }
+
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:fallbackURL];
+            request.HTTPMethod = @"GET";
+            request.timeoutInterval = 20.0;
+            [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+
+            innerSelf.currentArtistTopTracksTask = [innerSelf.session dataTaskWithRequest:request
+                                                                         completionHandler:^(NSData * _Nullable data,
+                                                                                             NSURLResponse * _Nullable response,
+                                                                                             NSError * _Nullable error) {
+                if (error != nil) {
+                    if (error.code == NSURLErrorCancelled) {
+                        return;
+                    }
+                    [innerSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
+                    }];
+                    return;
+                }
+
+                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                NSInteger statusCode = http.statusCode;
+                NSDictionary *json = nil;
+                if (data.length > 0) {
+                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([object isKindOfClass:NSDictionary.class]) {
+                        json = (NSDictionary *)object;
+                    }
+                }
+
+                if (statusCode < 200 || statusCode >= 300) {
+                    NSString *message = nil;
+                    id errorNode = json[@"error"];
+                    if ([errorNode isKindOfClass:NSDictionary.class]) {
+                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
+                    }
+                    if (message.length == 0) {
+                        message = [NSString stringWithFormat:@"Spotify artist tracks failed (%ld).", (long)statusCode];
+                    }
+                    [innerSelf dispatchOnMainQueue:^{
+                        completion(@[], SonoraMiniStreamingError(1126, message));
+                    }];
+                    return;
+                }
+
+                NSArray *items = [json[@"tracks"] isKindOfClass:NSArray.class] ? json[@"tracks"] : @[];
+                NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray arrayWithCapacity:items.count];
+                for (id itemObject in items) {
+                    SonoraMiniStreamingTrack *track = [innerSelf miniStreamingTrackFromSpotifyItem:itemObject];
+                    if (track == nil || track.trackID.length == 0) {
+                        continue;
+                    }
+                    [results addObject:track];
+                    if (results.count >= boundedLimit) {
+                        break;
+                    }
+                }
+
+                [innerSelf dispatchOnMainQueue:^{
+                    completion([results copy], nil);
+                }];
+            }];
+            [innerSelf.currentArtistTopTracksTask resume];
+        }];
+    };
+
     NSString *encodedArtistID = [normalizedArtistID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
     NSString *topTracksPath = [NSString stringWithFormat:@"/api/spotify/artists/%@/top-tracks", encodedArtistID ?: @""];
     NSURL *backendTopTracksURL = [self miniStreamingBackendURLForPath:topTracksPath
                                                             queryItems:@[
         [NSURLQueryItem queryItemWithName:@"limit" value:[NSString stringWithFormat:@"%lu", (unsigned long)boundedLimit]]
     ]];
-    if (backendTopTracksURL == nil) {
-        [self dispatchOnMainQueue:^{
-            completion(@[], SonoraMiniStreamingError(1124, @"Mini streaming backend URL is invalid."));
-        }];
+    if (![self isConfigured] || backendTopTracksURL == nil) {
+        if (canUseSpotifyFallback) {
+            startSpotifyFallback();
+        } else {
+            NSInteger errorCode = [self isConfigured] ? 1124 : 1122;
+            NSString *message = [self isConfigured] ? @"Mini streaming backend URL is invalid." : @"Mini streaming backend is missing.";
+            [self dispatchOnMainQueue:^{
+                completion(@[], SonoraMiniStreamingError(errorCode, message));
+            }];
+        }
         return;
     }
 
@@ -2229,9 +2373,13 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
             if (error.code == NSURLErrorCancelled) {
                 return;
             }
-            [strongBackendSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
-            }];
+            if (canUseSpotifyFallback) {
+                startSpotifyFallback();
+            } else {
+                [strongBackendSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
+                }];
+            }
             return;
         }
 
@@ -2246,15 +2394,19 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         }
 
         if (statusCode < 200 || statusCode >= 300) {
-            NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
-            if (statusCode == 451) {
-                message = @"Требуется VPN из-за региональных ограничений (451).";
-            } else if (message.length == 0) {
-                message = [NSString stringWithFormat:@"Mini streaming top tracks failed (%ld).", (long)statusCode];
+            if (canUseSpotifyFallback) {
+                startSpotifyFallback();
+            } else {
+                NSString *message = [strongBackendSelf miniStreamingErrorMessageFromJSON:json ?: @{}];
+                if (statusCode == 451) {
+                    message = @"Требуется VPN из-за региональных ограничений (451).";
+                } else if (message.length == 0) {
+                    message = [NSString stringWithFormat:@"Mini streaming top tracks failed (%ld).", (long)statusCode];
+                }
+                [strongBackendSelf dispatchOnMainQueue:^{
+                    completion(@[], SonoraMiniStreamingError(1126, message));
+                }];
             }
-            [strongBackendSelf dispatchOnMainQueue:^{
-                completion(@[], SonoraMiniStreamingError(1126, message));
-            }];
             return;
         }
 
@@ -2287,369 +2439,6 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         }];
     }];
     [self.currentArtistTopTracksTask resume];
-    return;
-
-    __weak typeof(self) weakSelf = self;
-    [self fetchSpotifyAccessTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable tokenError) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            return;
-        }
-
-        if (tokenError != nil || token.length == 0) {
-            [strongSelf dispatchOnMainQueue:^{
-                completion(@[], tokenError ?: SonoraMiniStreamingError(1123, @"Cannot fetch Spotify token."));
-            }];
-            return;
-        }
-
-        BOOL unlimited = (limit == 0 || limit == NSUIntegerMax);
-        NSUInteger boundedLimit = unlimited ? NSUIntegerMax : MAX((NSUInteger)1, limit);
-        NSUInteger maxAlbumCount = unlimited ? 500 : MIN(MAX(boundedLimit * 3, (NSUInteger)60), (NSUInteger)500);
-        NSString *artistPathID = [normalizedArtistID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
-        NSMutableArray<NSDictionary<NSString *, NSString *> *> *albums = [NSMutableArray array];
-        NSMutableSet<NSString *> *seenAlbumIDs = [NSMutableSet set];
-        NSMutableArray<SonoraMiniStreamingTrack *> *results = [NSMutableArray array];
-        NSMutableSet<NSString *> *seenTrackIDs = [NSMutableSet set];
-
-        __block void (^fetchAlbumAtIndex)(NSUInteger);
-        __block void (^fetchAlbumTracksPage)(NSUInteger, NSUInteger);
-        __block void (^fetchAlbumsPage)(NSUInteger);
-        __block void (^finishWithTopTracksFallback)(void);
-
-        finishWithTopTracksFallback = ^{
-            NSString *fallbackURLString = [NSString stringWithFormat:@"https://api.spotify.com/v1/artists/%@/top-tracks?market=US", artistPathID];
-            NSURL *fallbackURL = [NSURL URLWithString:fallbackURLString];
-            if (fallbackURL == nil) {
-                [strongSelf dispatchOnMainQueue:^{
-                    completion([results copy], nil);
-                }];
-                return;
-            }
-
-            NSMutableURLRequest *fallbackRequest = [NSMutableURLRequest requestWithURL:fallbackURL];
-            fallbackRequest.HTTPMethod = @"GET";
-            fallbackRequest.timeoutInterval = 20.0;
-            [fallbackRequest setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
-
-            strongSelf.currentArtistTopTracksTask = [strongSelf.session dataTaskWithRequest:fallbackRequest
-                                                                           completionHandler:^(NSData * _Nullable data,
-                                                                                               NSURLResponse * _Nullable response,
-                                                                                               NSError * _Nullable error) {
-                if (error != nil) {
-                    if (error.code == NSURLErrorCancelled) {
-                        return;
-                    }
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
-                    }];
-                    return;
-                }
-
-                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-                NSInteger statusCode = http.statusCode;
-                NSDictionary *json = nil;
-                if (data.length > 0) {
-                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                    if ([object isKindOfClass:NSDictionary.class]) {
-                        json = (NSDictionary *)object;
-                    }
-                }
-
-                if (statusCode < 200 || statusCode >= 300) {
-                    NSString *message = nil;
-                    id errorNode = json[@"error"];
-                    if ([errorNode isKindOfClass:NSDictionary.class]) {
-                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
-                    }
-                    if (message.length == 0) {
-                        message = [NSString stringWithFormat:@"Spotify artist tracks failed (%ld).", (long)statusCode];
-                    }
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion(@[], SonoraMiniStreamingError(1126, message));
-                    }];
-                    return;
-                }
-
-                NSArray *items = [json[@"tracks"] isKindOfClass:NSArray.class] ? json[@"tracks"] : @[];
-                NSMutableArray<SonoraMiniStreamingTrack *> *fallbackTracks = [NSMutableArray arrayWithCapacity:items.count];
-                for (id itemObject in items) {
-                    SonoraMiniStreamingTrack *track = [strongSelf miniStreamingTrackFromSpotifyItem:itemObject];
-                    if (track == nil || track.trackID.length == 0) {
-                        continue;
-                    }
-                    [fallbackTracks addObject:track];
-                    if (!unlimited && fallbackTracks.count >= boundedLimit) {
-                        break;
-                    }
-                }
-
-                [strongSelf dispatchOnMainQueue:^{
-                    completion([fallbackTracks copy], nil);
-                }];
-            }];
-            [strongSelf.currentArtistTopTracksTask resume];
-        };
-
-        fetchAlbumAtIndex = ^(NSUInteger albumIndex) {
-            if (!unlimited && results.count >= boundedLimit) {
-                [strongSelf dispatchOnMainQueue:^{
-                    completion([results copy], nil);
-                }];
-                return;
-            }
-            if (albumIndex >= albums.count) {
-                if (results.count > 0) {
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion([results copy], nil);
-                    }];
-                } else {
-                    finishWithTopTracksFallback();
-                }
-                return;
-            }
-            fetchAlbumTracksPage(albumIndex, 0);
-        };
-
-        fetchAlbumTracksPage = ^(NSUInteger albumIndex, NSUInteger offset) {
-            if (albumIndex >= albums.count) {
-                fetchAlbumAtIndex(albumIndex);
-                return;
-            }
-
-            NSDictionary<NSString *, NSString *> *albumEntry = albums[albumIndex];
-            NSString *albumID = SonoraTrimmedStringValue(albumEntry[@"id"]);
-            if (albumID.length == 0) {
-                fetchAlbumAtIndex(albumIndex + 1);
-                return;
-            }
-
-            NSString *encodedAlbumID = [albumID stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
-            NSString *urlString = [NSString stringWithFormat:@"https://api.spotify.com/v1/albums/%@/tracks?market=US&limit=50&offset=%lu",
-                                   encodedAlbumID,
-                                   (unsigned long)offset];
-            NSURL *requestURL = [NSURL URLWithString:urlString];
-            if (requestURL == nil) {
-                fetchAlbumAtIndex(albumIndex + 1);
-                return;
-            }
-
-            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL];
-            request.HTTPMethod = @"GET";
-            request.timeoutInterval = 20.0;
-            [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
-
-            strongSelf.currentArtistTopTracksTask = [strongSelf.session dataTaskWithRequest:request
-                                                                           completionHandler:^(NSData * _Nullable data,
-                                                                                               NSURLResponse * _Nullable response,
-                                                                                               NSError * _Nullable error) {
-                if (error != nil) {
-                    if (error.code == NSURLErrorCancelled) {
-                        return;
-                    }
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
-                    }];
-                    return;
-                }
-
-                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-                NSInteger statusCode = http.statusCode;
-                NSDictionary *json = nil;
-                if (data.length > 0) {
-                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                    if ([object isKindOfClass:NSDictionary.class]) {
-                        json = (NSDictionary *)object;
-                    }
-                }
-
-                if (statusCode < 200 || statusCode >= 300) {
-                    NSString *message = nil;
-                    id errorNode = json[@"error"];
-                    if ([errorNode isKindOfClass:NSDictionary.class]) {
-                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
-                    }
-                    if (message.length == 0) {
-                        message = [NSString stringWithFormat:@"Spotify album tracks failed (%ld).", (long)statusCode];
-                    }
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion(@[], SonoraMiniStreamingError(1126, message));
-                    }];
-                    return;
-                }
-
-                NSArray *items = [json[@"items"] isKindOfClass:NSArray.class] ? json[@"items"] : @[];
-                NSString *albumArtworkURL = SonoraTrimmedStringValue(albumEntry[@"artwork"]);
-                for (id itemObject in items) {
-                    if (![itemObject isKindOfClass:NSDictionary.class]) {
-                        continue;
-                    }
-                    NSDictionary *item = (NSDictionary *)itemObject;
-                    NSArray *artistNodes = [item[@"artists"] isKindOfClass:NSArray.class] ? item[@"artists"] : @[];
-                    BOOL containsArtist = (artistNodes.count == 0);
-                    for (id artistObject in artistNodes) {
-                        if (![artistObject isKindOfClass:NSDictionary.class]) {
-                            continue;
-                        }
-                        NSString *candidateID = SonoraTrimmedStringValue(((NSDictionary *)artistObject)[@"id"]);
-                        if (candidateID.length > 0 && [candidateID isEqualToString:normalizedArtistID]) {
-                            containsArtist = YES;
-                            break;
-                        }
-                    }
-                    if (!containsArtist) {
-                        continue;
-                    }
-
-                    NSMutableDictionary *normalizedItem = [item mutableCopy];
-                    if (albumArtworkURL.length > 0) {
-                        normalizedItem[@"album"] = @{@"images": @[@{@"url": albumArtworkURL}]};
-                    }
-
-                    SonoraMiniStreamingTrack *track = [strongSelf miniStreamingTrackFromSpotifyItem:normalizedItem];
-                    if (track == nil || track.trackID.length == 0) {
-                        continue;
-                    }
-                    if ([seenTrackIDs containsObject:track.trackID]) {
-                        continue;
-                    }
-                    [seenTrackIDs addObject:track.trackID];
-                    [results addObject:track];
-                    if (!unlimited && results.count >= boundedLimit) {
-                        break;
-                    }
-                }
-
-                if (!unlimited && results.count >= boundedLimit) {
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion([results copy], nil);
-                    }];
-                    return;
-                }
-
-                BOOL hasNext = SonoraTrimmedStringValue(json[@"next"]).length > 0;
-                NSUInteger nextOffset = offset + MAX(items.count, (NSUInteger)1);
-                if (hasNext && items.count > 0 && nextOffset < 2000) {
-                    fetchAlbumTracksPage(albumIndex, nextOffset);
-                    return;
-                }
-
-                fetchAlbumAtIndex(albumIndex + 1);
-            }];
-            [strongSelf.currentArtistTopTracksTask resume];
-        };
-
-        fetchAlbumsPage = ^(NSUInteger offset) {
-            NSString *urlString = [NSString stringWithFormat:@"https://api.spotify.com/v1/artists/%@/albums?include_groups=album,single&market=US&limit=50&offset=%lu",
-                                   artistPathID,
-                                   (unsigned long)offset];
-            NSURL *requestURL = [NSURL URLWithString:urlString];
-            if (requestURL == nil) {
-                [strongSelf dispatchOnMainQueue:^{
-                    completion(@[], SonoraMiniStreamingError(1124, @"Spotify artist albums URL is invalid."));
-                }];
-                return;
-            }
-
-            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL];
-            request.HTTPMethod = @"GET";
-            request.timeoutInterval = 20.0;
-            [request setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
-
-            strongSelf.currentArtistTopTracksTask = [strongSelf.session dataTaskWithRequest:request
-                                                                           completionHandler:^(NSData * _Nullable data,
-                                                                                               NSURLResponse * _Nullable response,
-                                                                                               NSError * _Nullable error) {
-                if (error != nil) {
-                    if (error.code == NSURLErrorCancelled) {
-                        return;
-                    }
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion(@[], SonoraMiniStreamingError(1125, error.localizedDescription));
-                    }];
-                    return;
-                }
-
-                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-                NSInteger statusCode = http.statusCode;
-                NSDictionary *json = nil;
-                if (data.length > 0) {
-                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                    if ([object isKindOfClass:NSDictionary.class]) {
-                        json = (NSDictionary *)object;
-                    }
-                }
-
-                if (statusCode < 200 || statusCode >= 300) {
-                    NSString *message = nil;
-                    id errorNode = json[@"error"];
-                    if ([errorNode isKindOfClass:NSDictionary.class]) {
-                        message = SonoraTrimmedStringValue(errorNode[@"message"]);
-                    }
-                    if (message.length == 0) {
-                        message = [NSString stringWithFormat:@"Spotify artist albums failed (%ld).", (long)statusCode];
-                    }
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion(@[], SonoraMiniStreamingError(1126, message));
-                    }];
-                    return;
-                }
-
-                NSArray *items = [json[@"items"] isKindOfClass:NSArray.class] ? json[@"items"] : @[];
-                for (id itemObject in items) {
-                    if (![itemObject isKindOfClass:NSDictionary.class]) {
-                        continue;
-                    }
-                    NSDictionary *item = (NSDictionary *)itemObject;
-                    NSString *albumID = SonoraTrimmedStringValue(item[@"id"]);
-                    if (albumID.length == 0 || [seenAlbumIDs containsObject:albumID]) {
-                        continue;
-                    }
-                    [seenAlbumIDs addObject:albumID];
-                    NSString *artworkURL = @"";
-                    NSArray *images = [item[@"images"] isKindOfClass:NSArray.class] ? item[@"images"] : @[];
-                    NSInteger bestWidth = -1;
-                    for (id imageObject in images) {
-                        if (![imageObject isKindOfClass:NSDictionary.class]) {
-                            continue;
-                        }
-                        NSDictionary *imageNode = (NSDictionary *)imageObject;
-                        NSString *candidateURL = SonoraTrimmedStringValue(imageNode[@"url"]);
-                        if (candidateURL.length == 0) {
-                            continue;
-                        }
-                        NSInteger width = [imageNode[@"width"] respondsToSelector:@selector(integerValue)] ? [imageNode[@"width"] integerValue] : 0;
-                        if (width > bestWidth) {
-                            bestWidth = width;
-                            artworkURL = candidateURL;
-                        } else if (bestWidth < 0 && artworkURL.length == 0) {
-                            artworkURL = candidateURL;
-                        }
-                    }
-                    [albums addObject:@{
-                        @"id": albumID,
-                        @"artwork": artworkURL ?: @""
-                    }];
-                    if (albums.count >= maxAlbumCount) {
-                        break;
-                    }
-                }
-
-                BOOL hasNext = SonoraTrimmedStringValue(json[@"next"]).length > 0;
-                NSUInteger nextOffset = offset + MAX(items.count, (NSUInteger)1);
-                BOOL canLoadNext = (hasNext && items.count > 0 && nextOffset < 2000 && albums.count < maxAlbumCount);
-                if (canLoadNext) {
-                    fetchAlbumsPage(nextOffset);
-                    return;
-                }
-
-                fetchAlbumAtIndex(0);
-            }];
-            [strongSelf.currentArtistTopTracksTask resume];
-        };
-
-        fetchAlbumsPage(0);
-    }];
 }
 
 - (NSArray<NSDictionary<NSString *, NSString *> *> *)rapidResolveCandidatesForTrackURL:(NSString *)trackURL
@@ -2829,12 +2618,124 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         return;
     }
 
-    if (![self isConfigured]) {
-        [self dispatchOnMainQueue:^{
-            completion(nil, SonoraMiniStreamingError(1202, @"Mini streaming backend is missing."));
+    BOOL canUseRapidFallback = [self canUseRapidResolveFallback];
+    NSString *spotifyTrackURL = [NSString stringWithFormat:@"https://open.spotify.com/track/%@", normalizedTrackID];
+    __weak typeof(self) weakSelf = self;
+    void (^startRapidFallback)(void) = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf fetchBrokerCredentialWithCompletion:^(NSString * _Nullable brokerHost, NSString * _Nullable brokerKey) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil) {
+                return;
+            }
+
+            NSArray<NSDictionary<NSString *, NSString *> *> *candidates = [innerSelf rapidResolveCandidatesForTrackURL:spotifyTrackURL
+                                                                                                              brokerHost:brokerHost ?: @""
+                                                                                                               brokerKey:brokerKey ?: @""];
+            if (candidates.count == 0) {
+                [innerSelf dispatchOnMainQueue:^{
+                    completion(nil, SonoraMiniStreamingError(1203, SonoraMiniStreamingInstallUnavailableMessage));
+                }];
+                return;
+            }
+
+            __block NSString *lastMessage = @"";
+            __block BOOL sawDailyQuota = NO;
+            __block void (^attemptCandidateAtIndex)(NSUInteger) = nil;
+            attemptCandidateAtIndex = ^(NSUInteger index) {
+                if (index >= candidates.count) {
+                    NSString *finalMessage = sawDailyQuota ? SonoraMiniStreamingInstallUnavailableMessage : lastMessage;
+                    if (finalMessage.length == 0) {
+                        finalMessage = SonoraMiniStreamingInstallUnavailableMessage;
+                    }
+                    [innerSelf dispatchOnMainQueue:^{
+                        completion(nil, SonoraMiniStreamingError(1206, finalMessage));
+                    }];
+                    return;
+                }
+
+                NSDictionary<NSString *, NSString *> *candidate = candidates[index];
+                NSURL *requestURL = [NSURL URLWithString:SonoraTrimmedStringValue(candidate[@"url"])];
+                NSString *requestHost = SonoraTrimmedStringValue(candidate[@"host"]);
+                NSString *requestKey = SonoraTrimmedStringValue(candidate[@"key"]);
+                if (requestURL == nil || requestHost.length == 0 || requestKey.length == 0) {
+                    attemptCandidateAtIndex(index + 1);
+                    return;
+                }
+
+                NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL];
+                request.HTTPMethod = @"GET";
+                request.timeoutInterval = 30.0;
+                [request setValue:requestHost forHTTPHeaderField:@"x-rapidapi-host"];
+                [request setValue:requestKey forHTTPHeaderField:@"x-rapidapi-key"];
+
+                NSURLSessionDataTask *task = [innerSelf.session dataTaskWithRequest:request
+                                                                   completionHandler:^(NSData * _Nullable data,
+                                                                                       NSURLResponse * _Nullable response,
+                                                                                       NSError * _Nullable error) {
+                    if (error != nil) {
+                        NSString *message = SonoraTrimmedStringValue(error.localizedDescription);
+                        NSString *lowerMessage = message.lowercaseString;
+                        if ([lowerMessage containsString:@"unable to resolve host"] ||
+                            [lowerMessage containsString:@"no address associated with hostname"] ||
+                            [lowerMessage containsString:@"could not resolve host"]) {
+                            message = @"Требуется VPN из-за региональных ограничений (451).";
+                        }
+                        if (message.length > 0) {
+                            lastMessage = message;
+                        }
+                        attemptCandidateAtIndex(index + 1);
+                        return;
+                    }
+
+                    NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+                    NSInteger statusCode = http.statusCode;
+                    NSDictionary *json = nil;
+                    if (data.length > 0) {
+                        id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                        if ([object isKindOfClass:NSDictionary.class]) {
+                            json = (NSDictionary *)object;
+                        }
+                    }
+
+                    NSDictionary<NSString *, id> *payload = [innerSelf miniStreamingPayloadFromRapidJSON:json trackID:normalizedTrackID];
+                    if (statusCode >= 200 && statusCode < 300 && payload != nil) {
+                        [innerSelf dispatchOnMainQueue:^{
+                            completion(payload, nil);
+                        }];
+                        return;
+                    }
+
+                    NSString *message = SonoraTrimmedStringValue(json[@"message"]);
+                    if (message.length == 0) {
+                        message = SonoraTrimmedStringValue(json[@"error"]);
+                    }
+                    if (statusCode == 451) {
+                        message = @"Требуется VPN из-за региональных ограничений (451).";
+                    } else if (message.length == 0 && (statusCode < 200 || statusCode >= 300)) {
+                        message = [NSString stringWithFormat:@"RapidAPI request failed (%ld).", (long)statusCode];
+                    } else if (message.length == 0 && payload == nil) {
+                        message = @"RapidAPI did not return media url.";
+                    }
+                    if (message.length > 0) {
+                        lastMessage = message;
+                        if ([innerSelf isRapidQuotaMessage:message]) {
+                            sawDailyQuota = YES;
+                            [innerSelf markRapidAPIKeyBlockedForQuotaIfNeeded:requestKey];
+                        }
+                    }
+                    attemptCandidateAtIndex(index + 1);
+                }];
+                [task resume];
+            };
+
+            attemptCandidateAtIndex(0);
         }];
-        return;
-    }
+    };
 
     NSString *backendSpotifyTrackURL = [NSString stringWithFormat:@"https://open.spotify.com/track/%@", normalizedTrackID];
     NSURL *backendDownloadURL = [self miniStreamingBackendURLForPath:SonoraMiniStreamingBackendDownloadPath
@@ -2842,10 +2743,16 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
         [NSURLQueryItem queryItemWithName:@"trackId" value:normalizedTrackID],
         [NSURLQueryItem queryItemWithName:@"trackUrl" value:backendSpotifyTrackURL]
     ]];
-    if (backendDownloadURL == nil) {
-        [self dispatchOnMainQueue:^{
-            completion(nil, SonoraMiniStreamingError(1203, @"Mini streaming backend URL is invalid."));
-        }];
+    if (![self isConfigured] || backendDownloadURL == nil) {
+        if (canUseRapidFallback) {
+            startRapidFallback();
+        } else {
+            NSInteger errorCode = [self isConfigured] ? 1203 : 1202;
+            NSString *message = [self isConfigured] ? @"Mini streaming backend URL is invalid." : @"Mini streaming backend is missing.";
+            [self dispatchOnMainQueue:^{
+                completion(nil, SonoraMiniStreamingError(errorCode, message));
+            }];
+        }
         return;
     }
 
@@ -2876,9 +2783,13 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
             if (message.length == 0) {
                 message = SonoraMiniStreamingInstallUnavailableMessage;
             }
-            [strongBackendSelf dispatchOnMainQueue:^{
-                completion(nil, SonoraMiniStreamingError(1204, message));
-            }];
+            if (canUseRapidFallback) {
+                startRapidFallback();
+            } else {
+                [strongBackendSelf dispatchOnMainQueue:^{
+                    completion(nil, SonoraMiniStreamingError(1204, message));
+                }];
+            }
             return;
         }
 
@@ -2915,123 +2826,15 @@ typedef void (^SonoraMiniStreamingResolveCompletion)(NSDictionary<NSString *, id
             message = SonoraMiniStreamingInstallUnavailableMessage;
         }
 
-        [strongBackendSelf dispatchOnMainQueue:^{
-            completion(nil, SonoraMiniStreamingError(1206, message));
-        }];
+        if (canUseRapidFallback) {
+            startRapidFallback();
+        } else {
+            [strongBackendSelf dispatchOnMainQueue:^{
+                completion(nil, SonoraMiniStreamingError(1206, message));
+            }];
+        }
     }];
     [backendTask resume];
-    return;
-
-    NSString *spotifyTrackURL = [NSString stringWithFormat:@"https://open.spotify.com/track/%@", normalizedTrackID];
-    __weak typeof(self) weakSelf = self;
-    [self fetchBrokerCredentialWithCompletion:^(NSString * _Nullable brokerHost, NSString * _Nullable brokerKey) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            return;
-        }
-
-        NSArray<NSDictionary<NSString *, NSString *> *> *candidates = [strongSelf rapidResolveCandidatesForTrackURL:spotifyTrackURL
-                                                                                                          brokerHost:brokerHost ?: @""
-                                                                                                           brokerKey:brokerKey ?: @""];
-        if (candidates.count == 0) {
-            [strongSelf dispatchOnMainQueue:^{
-                completion(nil, SonoraMiniStreamingError(1203, SonoraMiniStreamingInstallUnavailableMessage));
-            }];
-            return;
-        }
-
-        __block NSString *lastMessage = @"";
-        __block BOOL sawDailyQuota = NO;
-        __block void (^attemptCandidateAtIndex)(NSUInteger) = nil;
-        attemptCandidateAtIndex = ^(NSUInteger index) {
-            if (index >= candidates.count) {
-                NSString *finalMessage = sawDailyQuota ? SonoraMiniStreamingInstallUnavailableMessage : lastMessage;
-                if (finalMessage.length == 0) {
-                    finalMessage = SonoraMiniStreamingInstallUnavailableMessage;
-                }
-                [strongSelf dispatchOnMainQueue:^{
-                    completion(nil, SonoraMiniStreamingError(1206, finalMessage));
-                }];
-                return;
-            }
-
-            NSDictionary<NSString *, NSString *> *candidate = candidates[index];
-            NSURL *requestURL = [NSURL URLWithString:SonoraTrimmedStringValue(candidate[@"url"])];
-            NSString *requestHost = SonoraTrimmedStringValue(candidate[@"host"]);
-            NSString *requestKey = SonoraTrimmedStringValue(candidate[@"key"]);
-            if (requestURL == nil || requestHost.length == 0 || requestKey.length == 0) {
-                attemptCandidateAtIndex(index + 1);
-                return;
-            }
-
-            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL];
-            request.HTTPMethod = @"GET";
-            request.timeoutInterval = 30.0;
-            [request setValue:requestHost forHTTPHeaderField:@"x-rapidapi-host"];
-            [request setValue:requestKey forHTTPHeaderField:@"x-rapidapi-key"];
-
-            NSURLSessionDataTask *task = [strongSelf.session dataTaskWithRequest:request
-                                                                completionHandler:^(NSData * _Nullable data,
-                                                                                    NSURLResponse * _Nullable response,
-                                                                                    NSError * _Nullable error) {
-                if (error != nil) {
-                    NSString *message = SonoraTrimmedStringValue(error.localizedDescription);
-                    NSString *lowerMessage = message.lowercaseString;
-                    if ([lowerMessage containsString:@"unable to resolve host"] ||
-                        [lowerMessage containsString:@"no address associated with hostname"] ||
-                        [lowerMessage containsString:@"could not resolve host"]) {
-                        message = @"Требуется VPN из-за региональных ограничений (451).";
-                    }
-                    if (message.length > 0) {
-                        lastMessage = message;
-                    }
-                    attemptCandidateAtIndex(index + 1);
-                    return;
-                }
-
-                NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-                NSInteger statusCode = http.statusCode;
-                NSDictionary *json = nil;
-                if (data.length > 0) {
-                    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                    if ([object isKindOfClass:NSDictionary.class]) {
-                        json = (NSDictionary *)object;
-                    }
-                }
-
-                NSDictionary<NSString *, id> *payload = [strongSelf miniStreamingPayloadFromRapidJSON:json trackID:normalizedTrackID];
-                if (statusCode >= 200 && statusCode < 300 && payload != nil) {
-                    [strongSelf dispatchOnMainQueue:^{
-                        completion(payload, nil);
-                    }];
-                    return;
-                }
-
-                NSString *message = SonoraTrimmedStringValue(json[@"message"]);
-                if (message.length == 0) {
-                    message = SonoraTrimmedStringValue(json[@"error"]);
-                }
-                if (statusCode == 451) {
-                    message = @"Требуется VPN из-за региональных ограничений (451).";
-                } else if (message.length == 0 && (statusCode < 200 || statusCode >= 300)) {
-                    message = [NSString stringWithFormat:@"RapidAPI request failed (%ld).", (long)statusCode];
-                } else if (message.length == 0 && payload == nil) {
-                    message = @"RapidAPI did not return media url.";
-                }
-                if (message.length > 0) {
-                    lastMessage = message;
-                    if ([strongSelf isRapidQuotaMessage:message]) {
-                        sawDailyQuota = YES;
-                        [strongSelf markRapidAPIKeyBlockedForQuotaIfNeeded:requestKey];
-                    }
-                }
-                attemptCandidateAtIndex(index + 1);
-            }];
-            [task resume];
-        };
-
-        attemptCandidateAtIndex(0);
-    }];
 }
 
 @end
