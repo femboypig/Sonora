@@ -4416,6 +4416,9 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
 @property (nonatomic, assign) BOOL musicOnlyMode;
 @property (nonatomic, assign) BOOL multiSelectMode;
 @property (nonatomic, assign) NSUInteger miniStreamingQueryToken;
+@property (nonatomic, assign) NSUInteger reloadTracksRequestToken;
+@property (nonatomic, assign) NSUInteger reloadPlaylistsRequestToken;
+@property (nonatomic, assign) BOOL playbackSurfaceRefreshScheduled;
 @property (nonatomic, copy, nullable) dispatch_block_t miniStreamingSearchDebounceWorkItem;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *selectedTrackIDs;
 @property (nonatomic, strong) UILongPressGestureRecognizer *selectionLongPressRecognizer;
@@ -4505,8 +4508,7 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     [self refreshNavigationItemsForMusicSelectionState];
     [self updatePresentationMode];
     [self updateSearchControllerAttachment];
-    [self.tableView reloadData];
-    [self.searchCollectionView reloadData];
+    [self reloadVisibleContentViews];
 }
 
 - (void)handleDismissSwipe {
@@ -4732,9 +4734,37 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     }
     self.visibleSections = [sections copy];
 
-    [self.tableView reloadData];
-    [self.searchCollectionView reloadData];
+    [self reloadVisibleContentViews];
     [self updateEmptyState];
+}
+
+- (void)reloadVisibleContentViews {
+    if (self.tableView != nil && !self.tableView.hidden) {
+        [self.tableView reloadData];
+    }
+    if (self.searchCollectionView != nil && !self.searchCollectionView.hidden) {
+        [self.searchCollectionView reloadData];
+    }
+}
+
+- (void)schedulePlaybackStateSurfaceRefresh {
+    if (self.playbackSurfaceRefreshScheduled) {
+        return;
+    }
+    self.playbackSurfaceRefreshScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        strongSelf.playbackSurfaceRefreshScheduled = NO;
+        if (strongSelf.viewIfLoaded.window == nil) {
+            return;
+        }
+        [strongSelf reloadVisibleContentViews];
+        [strongSelf ensureCurrentMiniStreamingPlaceholderIsInstalling];
+    });
 }
 
 - (void)updateEmptyState {
@@ -4938,17 +4968,42 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
 }
 
 - (void)reloadTracks {
-    self.tracks = [SonoraLibraryManager.sharedManager reloadTracks];
-    [self rehydrateMiniStreamingInstalledTracksFromLibrary];
-    [SonoraPlaylistStore.sharedStore reloadPlaylists];
-    self.playlists = SonoraPlaylistStore.sharedStore.playlists ?: @[];
-    [self applySearchFilterAndReload];
+    self.reloadTracksRequestToken += 1;
+    NSUInteger requestToken = self.reloadTracksRequestToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<SonoraTrack *> *reloadedTracks = [SonoraLibraryManager.sharedManager reloadTracks] ?: @[];
+        [SonoraPlaylistStore.sharedStore reloadPlaylists];
+        NSArray<SonoraPlaylist *> *reloadedPlaylists = SonoraPlaylistStore.sharedStore.playlists ?: @[];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil || requestToken != strongSelf.reloadTracksRequestToken) {
+                return;
+            }
+            strongSelf.tracks = reloadedTracks;
+            [strongSelf rehydrateMiniStreamingInstalledTracksFromLibrary];
+            strongSelf.playlists = reloadedPlaylists;
+            [strongSelf applySearchFilterAndReload];
+        });
+    });
 }
 
 - (void)handlePlaylistsChanged {
-    [SonoraPlaylistStore.sharedStore reloadPlaylists];
-    self.playlists = SonoraPlaylistStore.sharedStore.playlists ?: @[];
-    [self applySearchFilterAndReload];
+    self.reloadPlaylistsRequestToken += 1;
+    NSUInteger requestToken = self.reloadPlaylistsRequestToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [SonoraPlaylistStore.sharedStore reloadPlaylists];
+        NSArray<SonoraPlaylist *> *reloadedPlaylists = SonoraPlaylistStore.sharedStore.playlists ?: @[];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil || requestToken != strongSelf.reloadPlaylistsRequestToken) {
+                return;
+            }
+            strongSelf.playlists = reloadedPlaylists;
+            [strongSelf applySearchFilterAndReload];
+        });
+    });
 }
 
 - (void)handlePlaybackChanged {
@@ -4965,9 +5020,7 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     }
     self.miniStreamingCurrentPlaybackTrackID = nextMiniTrackID.length > 0 ? nextMiniTrackID : nil;
 
-    [self.tableView reloadData];
-    [self.searchCollectionView reloadData];
-    [self ensureCurrentMiniStreamingPlaceholderIsInstalling];
+    [self schedulePlaybackStateSurfaceRefresh];
 }
 
 - (void)openPlayer {

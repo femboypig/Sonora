@@ -2482,21 +2482,50 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 }
 
 - (void)refreshOnlinePlaylistCacheUsageLabel {
-    unsigned long long usedBytes = [self currentOnlinePlaylistCacheUsageBytes];
-    self.onlinePlaylistCacheUsedValueLabel.text = [NSByteCountFormatter stringFromByteCount:(long long)usedBytes
-                                                                                  countStyle:NSByteCountFormatterCountStyleFile];
-    unsigned long long maxBytes = [self onlinePlaylistCacheLimitBytes];
-    BOOL overLimit = (self.onlinePlaylistCacheTracksSwitch.isOn && maxBytes != ULLONG_MAX && usedBytes > maxBytes);
-    self.onlinePlaylistCacheUsedValueLabel.textColor = overLimit ? UIColor.systemRedColor : UIColor.labelColor;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        unsigned long long usedBytes = [strongSelf currentOnlinePlaylistCacheUsageBytes];
+        unsigned long long maxBytes = [strongSelf onlinePlaylistCacheLimitBytes];
+        BOOL cacheEnabled = strongSelf.onlinePlaylistCacheTracksSwitch.isOn;
+        NSString *usedText = [NSByteCountFormatter stringFromByteCount:(long long)usedBytes
+                                                            countStyle:NSByteCountFormatterCountStyleFile];
+        BOOL overLimit = (cacheEnabled && maxBytes != ULLONG_MAX && usedBytes > maxBytes);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil) {
+                return;
+            }
+            innerSelf.onlinePlaylistCacheUsedValueLabel.text = usedText;
+            innerSelf.onlinePlaylistCacheUsedValueLabel.textColor = overLimit ? UIColor.systemRedColor : UIColor.labelColor;
+        });
+    });
 }
 
 - (void)refreshStorageUsage {
-    unsigned long long usedBytes = [self currentLibraryUsageBytes];
-    self.usedStorageValueLabel.text = [NSByteCountFormatter stringFromByteCount:(long long)usedBytes
-                                                                      countStyle:NSByteCountFormatterCountStyleFile];
-    unsigned long long maxBytes = [self maxStorageLimitBytes];
-    BOOL overLimit = (maxBytes != ULLONG_MAX && usedBytes > maxBytes);
-    self.usedStorageValueLabel.textColor = overLimit ? UIColor.systemRedColor : UIColor.labelColor;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        unsigned long long usedBytes = [strongSelf currentLibraryUsageBytes];
+        unsigned long long maxBytes = [strongSelf maxStorageLimitBytes];
+        NSString *usedText = [NSByteCountFormatter stringFromByteCount:(long long)usedBytes
+                                                            countStyle:NSByteCountFormatterCountStyleFile];
+        BOOL overLimit = (maxBytes != ULLONG_MAX && usedBytes > maxBytes);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil) {
+                return;
+            }
+            innerSelf.usedStorageValueLabel.text = usedText;
+            innerSelf.usedStorageValueLabel.textColor = overLimit ? UIColor.systemRedColor : UIColor.labelColor;
+        });
+    });
 }
 
 - (unsigned long long)maxStorageLimitBytes {
@@ -2994,7 +3023,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         if (sourceURL == nil) {
             continue;
         }
-        NSData *audioData = [NSData dataWithContentsOfURL:sourceURL options:0 error:nil];
+        NSData *audioData = [NSData dataWithContentsOfURL:sourceURL options:NSDataReadingMappedIfSafe error:nil];
         if (audioData.length == 0) {
             continue;
         }
@@ -3063,7 +3092,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         NSString *coverEntry = nil;
         if (playlist.customCoverFileName.length > 0) {
             NSURL *coverURL = [coversDirectoryURL URLByAppendingPathComponent:playlist.customCoverFileName];
-            NSData *coverData = [NSData dataWithContentsOfURL:coverURL options:0 error:nil];
+            NSData *coverData = [NSData dataWithContentsOfURL:coverURL options:NSDataReadingMappedIfSafe error:nil];
             if (coverData.length > 0) {
                 NSString *coverExtension = [self safeExtensionFromString:coverURL.pathExtension fallback:@"png"];
                 coverEntry = [NSString stringWithFormat:@"playlist_covers/%@.%@", backupPlaylistID, coverExtension];
