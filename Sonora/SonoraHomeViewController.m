@@ -67,6 +67,7 @@ static UIView *SonoraHomeNavigationTitleView(NSString *text) {
 
 static NSString * const SonoraSettingsAccentHexKey = @"sonora.settings.accentHex";
 static NSString * const SonoraSettingsLegacyAccentColorKey = @"sonora.settings.accentColor";
+static NSString * const SonoraSettingsMyWaveLookKey = @"sonora.settings.myWaveLook";
 
 static UIColor *SonoraHomeDefaultAccentColor(void) {
     return [UIColor colorWithRed:1.0 green:0.83 blue:0.08 alpha:1.0];
@@ -543,6 +544,23 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
 
 @end
 
+typedef NS_ENUM(NSInteger, SonoraMyWaveLook) {
+    SonoraMyWaveLookClouds = 0,
+    SonoraMyWaveLookContours = 1
+};
+
+static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSInteger storedValue = [defaults objectForKey:SonoraSettingsMyWaveLookKey]
+    ? [defaults integerForKey:SonoraSettingsMyWaveLookKey]
+    : SonoraMyWaveLookContours;
+    if (storedValue != SonoraMyWaveLookClouds && storedValue != SonoraMyWaveLookContours) {
+        storedValue = SonoraMyWaveLookContours;
+        [defaults setInteger:storedValue forKey:SonoraSettingsMyWaveLookKey];
+    }
+    return (SonoraMyWaveLook)storedValue;
+}
+
 @interface SonoraWaveAnimatedBackgroundView : UIView
 
 - (void)applyPalette:(NSArray<UIColor *> *)palette animated:(BOOL)animated;
@@ -552,6 +570,651 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
 @end
 
 @interface SonoraWaveAnimatedBackgroundView ()
+
+@property (nonatomic, strong) CAGradientLayer *baseGradientLayer;
+@property (nonatomic, strong) CAGradientLayer *haloLayer;
+@property (nonatomic, strong) CAGradientLayer *coreGlowLayer;
+@property (nonatomic, strong) CALayer *lineContainerLayer;
+@property (nonatomic, strong) CAGradientLayer *lineMaskLayer;
+@property (nonatomic, strong) NSArray<CAShapeLayer *> *lineLayers;
+@property (nonatomic, strong) CAGradientLayer *vignetteLayer;
+@property (nonatomic, strong) CAGradientLayer *edgeFadeMaskLayer;
+@property (nonatomic, copy) NSArray<UIColor *> *currentPalette;
+@property (nonatomic, assign) BOOL hasStartedAnimations;
+@property (nonatomic, assign) BOOL playing;
+@property (nonatomic, assign) CGFloat pulseSeed;
+@property (nonatomic, assign) CGSize configuredSize;
+@property (nonatomic, copy, nullable) NSString *currentTrackIdentifier;
+@property (nonatomic, assign) NSUInteger geometryTransitionGeneration;
+
+@end
+
+@implementation SonoraWaveAnimatedBackgroundView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.pulseSeed = 0.43f;
+        [self setupUI];
+    }
+    return self;
+}
+
+- (void)setupUI {
+    self.clipsToBounds = NO;
+
+    CAGradientLayer *base = [CAGradientLayer layer];
+    base.type = kCAGradientLayerRadial;
+    base.startPoint = CGPointMake(0.50, 0.50);
+    base.endPoint = CGPointMake(1.0, 1.0);
+    base.colors = @[
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor
+    ];
+    base.locations = @[@0.0, @0.22, @0.58, @1.0];
+    [self.layer addSublayer:base];
+    self.baseGradientLayer = base;
+
+    CAGradientLayer *halo = [CAGradientLayer layer];
+    halo.type = kCAGradientLayerRadial;
+    halo.startPoint = CGPointMake(0.62, 0.42);
+    halo.endPoint = CGPointMake(1.0, 1.0);
+    halo.colors = @[
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor
+    ];
+    halo.locations = @[@0.0, @0.42, @1.0];
+    halo.opacity = 0.90;
+    [self.layer addSublayer:halo];
+    self.haloLayer = halo;
+
+    CAGradientLayer *coreGlow = [CAGradientLayer layer];
+    coreGlow.type = kCAGradientLayerRadial;
+    coreGlow.startPoint = CGPointMake(0.50, 0.52);
+    coreGlow.endPoint = CGPointMake(1.0, 1.0);
+    coreGlow.colors = @[
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor
+    ];
+    coreGlow.locations = @[@0.0, @0.22, @0.52, @1.0];
+    coreGlow.opacity = 0.0f;
+    [self.layer addSublayer:coreGlow];
+    self.coreGlowLayer = coreGlow;
+
+    CALayer *lineContainer = [CALayer layer];
+    [self.layer addSublayer:lineContainer];
+    self.lineContainerLayer = lineContainer;
+
+    CAGradientLayer *lineMask = [CAGradientLayer layer];
+    lineMask.type = kCAGradientLayerRadial;
+    lineMask.startPoint = CGPointMake(0.50, 0.52);
+    lineMask.endPoint = CGPointMake(1.0, 1.0);
+    lineMask.colors = @[
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.88].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.72].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor
+    ];
+    lineMask.locations = @[@0.0, @0.16, @0.46, @0.82, @1.0];
+    lineContainer.mask = lineMask;
+    self.lineMaskLayer = lineMask;
+
+    NSMutableArray<CAShapeLayer *> *lines = [NSMutableArray arrayWithCapacity:7];
+    for (NSUInteger idx = 0; idx < 7; idx += 1) {
+        CAShapeLayer *line = [CAShapeLayer layer];
+        line.fillColor = UIColor.clearColor.CGColor;
+        line.strokeColor = UIColor.whiteColor.CGColor;
+        line.lineCap = kCALineCapRound;
+        line.lineJoin = kCALineJoinRound;
+        line.opacity = 0.0f;
+        line.shadowColor = UIColor.whiteColor.CGColor;
+        line.shadowOpacity = 0.22f;
+        line.shadowRadius = 10.0f;
+        line.shadowOffset = CGSizeZero;
+        [lineContainer addSublayer:line];
+        [lines addObject:line];
+    }
+    self.lineLayers = [lines copy];
+
+    CAGradientLayer *vignette = [CAGradientLayer layer];
+    vignette.type = kCAGradientLayerRadial;
+    vignette.startPoint = CGPointMake(0.50, 0.52);
+    vignette.endPoint = CGPointMake(1.0, 1.0);
+    vignette.colors = @[
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor,
+        (__bridge id)UIColor.clearColor.CGColor
+    ];
+    vignette.locations = @[@0.56, @0.82, @1.0];
+    [self.layer addSublayer:vignette];
+    self.vignetteLayer = vignette;
+
+    CAGradientLayer *edgeFadeMask = [CAGradientLayer layer];
+    edgeFadeMask.startPoint = CGPointMake(0.50, 0.0);
+    edgeFadeMask.endPoint = CGPointMake(0.50, 1.0);
+    edgeFadeMask.colors = @[
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.86].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
+        (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor
+    ];
+    edgeFadeMask.locations = @[@0.0, @0.14, @0.24, @0.92, @1.0];
+    self.layer.mask = edgeFadeMask;
+    self.edgeFadeMaskLayer = edgeFadeMask;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.baseGradientLayer.frame = self.bounds;
+    self.haloLayer.frame = self.bounds;
+    self.coreGlowLayer.frame = self.bounds;
+    self.lineContainerLayer.frame = self.bounds;
+    self.lineMaskLayer.frame = self.bounds;
+    self.vignetteLayer.frame = self.bounds;
+    self.edgeFadeMaskLayer.frame = self.bounds;
+
+    if (!CGSizeEqualToSize(self.configuredSize, self.bounds.size)) {
+        self.configuredSize = self.bounds.size;
+        [self configureLineGeometry];
+        [self restartAnimations];
+    } else if (!self.hasStartedAnimations) {
+        [self startAnimationsIfNeeded];
+        [self restartAnimations];
+    }
+}
+
+- (void)startAnimationsIfNeeded {
+    if (self.hasStartedAnimations) {
+        return;
+    }
+    self.hasStartedAnimations = YES;
+}
+
+- (void)setPlaying:(BOOL)playing {
+    if (_playing == playing) {
+        [self updatePlaybackStateAnimated:NO];
+        return;
+    }
+    _playing = playing;
+    [self updatePlaybackStateAnimated:YES];
+}
+
+- (void)setPulseSeedWithTrackIdentifier:(NSString * _Nullable)identifier {
+    NSString *normalizedIdentifier = (identifier.length > 0) ? identifier : nil;
+    if ((self.currentTrackIdentifier == nil && normalizedIdentifier == nil) ||
+        [self.currentTrackIdentifier isEqualToString:normalizedIdentifier]) {
+        return;
+    }
+    self.currentTrackIdentifier = normalizedIdentifier;
+
+    const char *utf8 = normalizedIdentifier.UTF8String;
+    if (utf8 == NULL || utf8[0] == '\0') {
+        self.pulseSeed = 0.43f;
+        if (!CGSizeEqualToSize(self.bounds.size, CGSizeZero)) {
+            [self transitionToUpdatedGeometry];
+        }
+        return;
+    }
+
+    uint64_t hash = 1469598103934665603ULL;
+    const uint8_t *bytes = (const uint8_t *)utf8;
+    while (*bytes != 0) {
+        hash ^= (uint64_t)(*bytes);
+        hash *= 1099511628211ULL;
+        bytes += 1;
+    }
+    self.pulseSeed = (CGFloat)((hash % 1000ULL) / 1000.0);
+    if (!CGSizeEqualToSize(self.bounds.size, CGSizeZero)) {
+        [self transitionToUpdatedGeometry];
+    }
+}
+
+- (void)applyPalette:(NSArray<UIColor *> *)palette animated:(BOOL)animated {
+    NSArray<UIColor *> *resolved = (palette.count >= 4) ? palette : SonoraResolvedWavePalette(nil);
+    self.currentPalette = resolved;
+    BOOL lightTheme = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleLight);
+
+    NSArray *baseColors = @[
+        (__bridge id)[[(lightTheme
+                        ? SonoraBlendColor(resolved[1], UIColor.whiteColor, 0.90)
+                        : SonoraBlendColor(resolved[0], UIColor.blackColor, 0.42))
+                       colorWithAlphaComponent:(lightTheme ? 0.16 : 0.28)] CGColor],
+        (__bridge id)[[(lightTheme
+                        ? SonoraBlendColor(resolved[2], UIColor.whiteColor, 0.92)
+                        : SonoraBlendColor(resolved[2], UIColor.blackColor, 0.56))
+                       colorWithAlphaComponent:(lightTheme ? 0.08 : 0.15)] CGColor],
+        (__bridge id)[[(lightTheme
+                        ? SonoraBlendColor(resolved[0], UIColor.whiteColor, 0.97)
+                        : SonoraBlendColor(resolved[3], UIColor.blackColor, 0.76))
+                       colorWithAlphaComponent:(lightTheme ? 0.02 : 0.04)] CGColor],
+        (__bridge id)[UIColor clearColor].CGColor
+    ];
+    if (animated) {
+        CABasicAnimation *baseAnim = [CABasicAnimation animationWithKeyPath:@"colors"];
+        baseAnim.fromValue = self.baseGradientLayer.colors;
+        baseAnim.toValue = baseColors;
+        baseAnim.duration = 2.0;
+        baseAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.baseGradientLayer addAnimation:baseAnim forKey:@"sonora_wave_base_colors"];
+    }
+    self.baseGradientLayer.colors = baseColors;
+
+    UIColor *haloColor = lightTheme
+    ? SonoraBlendColor(resolved[3], UIColor.whiteColor, 0.68)
+    : SonoraBlendColor(resolved[3], UIColor.whiteColor, 0.18);
+    NSArray *haloColors = @[
+        (__bridge id)[haloColor colorWithAlphaComponent:(lightTheme ? 0.22 : 0.28)].CGColor,
+        (__bridge id)[haloColor colorWithAlphaComponent:(lightTheme ? 0.07 : 0.10)].CGColor,
+        (__bridge id)[haloColor colorWithAlphaComponent:0.0].CGColor
+    ];
+    if (animated) {
+        CABasicAnimation *haloAnim = [CABasicAnimation animationWithKeyPath:@"colors"];
+        haloAnim.fromValue = self.haloLayer.colors;
+        haloAnim.toValue = haloColors;
+        haloAnim.duration = 2.0;
+        haloAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.haloLayer addAnimation:haloAnim forKey:@"sonora_wave_halo_colors"];
+    }
+    self.haloLayer.colors = haloColors;
+
+    UIColor *coreColor = lightTheme
+    ? SonoraBlendColor(resolved[2], UIColor.whiteColor, 0.58)
+    : SonoraBlendColor(resolved[2], UIColor.whiteColor, 0.08);
+    NSArray *coreGlowColors = @[
+        (__bridge id)[coreColor colorWithAlphaComponent:(lightTheme ? 0.22 : 0.20)].CGColor,
+        (__bridge id)[coreColor colorWithAlphaComponent:(lightTheme ? 0.08 : 0.07)].CGColor,
+        (__bridge id)[coreColor colorWithAlphaComponent:0.0].CGColor
+    ];
+    if (animated) {
+        CABasicAnimation *coreAnim = [CABasicAnimation animationWithKeyPath:@"colors"];
+        coreAnim.fromValue = self.coreGlowLayer.colors;
+        coreAnim.toValue = coreGlowColors;
+        coreAnim.duration = 2.2;
+        coreAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.coreGlowLayer addAnimation:coreAnim forKey:@"sonora_wave_core_colors"];
+    }
+    self.coreGlowLayer.colors = coreGlowColors;
+
+    NSArray<UIColor *> *lineColors = @[
+        lightTheme ? SonoraBlendColor(resolved[3], UIColor.whiteColor, 0.14) : SonoraBlendColor(resolved[3], UIColor.whiteColor, 0.06),
+        lightTheme ? SonoraBlendColor(resolved[1], UIColor.whiteColor, 0.20) : SonoraBlendColor(resolved[1], UIColor.whiteColor, 0.08),
+        lightTheme ? SonoraBlendColor(resolved[2], UIColor.whiteColor, 0.16) : SonoraBlendColor(resolved[2], UIColor.whiteColor, 0.06),
+        lightTheme ? SonoraBlendColor(resolved[0], UIColor.whiteColor, 0.10) : SonoraBlendColor(resolved[0], UIColor.whiteColor, 0.02)
+    ];
+    [self.lineLayers enumerateObjectsUsingBlock:^(CAShapeLayer * _Nonnull line, NSUInteger idx, BOOL * _Nonnull stop) {
+        (void)stop;
+        UIColor *color = lineColors[idx % lineColors.count];
+        CGFloat alpha = lightTheme ? (idx < 3 ? 0.88f : 0.68f) : (idx < 3 ? 1.0f : 0.82f);
+        CGColorRef strokeColor = [color colorWithAlphaComponent:alpha].CGColor;
+        if (animated) {
+            CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:@"strokeColor"];
+            anim.fromValue = (__bridge id)line.strokeColor;
+            anim.toValue = (__bridge id)strokeColor;
+            anim.duration = 1.8;
+            anim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            [line addAnimation:anim forKey:[NSString stringWithFormat:@"sonora_wave_line_color_%lu", (unsigned long)idx]];
+        }
+        line.strokeColor = strokeColor;
+        line.shadowColor = strokeColor;
+        line.shadowOpacity = lightTheme ? (idx < 3 ? 0.30f : 0.16f) : (idx < 3 ? 0.50f : 0.30f);
+        line.shadowRadius = (idx < 2) ? 18.0f : ((idx < 4) ? 12.0f : 8.0f);
+    }];
+
+    NSArray *vignetteColors = @[
+        (__bridge id)[UIColor colorWithWhite:0.0 alpha:0.0].CGColor,
+        (__bridge id)[[(lightTheme
+                        ? SonoraBlendColor(resolved[0], UIColor.whiteColor, 0.98)
+                        : SonoraBlendColor(resolved[0], UIColor.blackColor, 0.86))
+                       colorWithAlphaComponent:(lightTheme ? 0.015 : 0.028)] CGColor],
+        (__bridge id)[[(lightTheme
+                        ? SonoraBlendColor(resolved[3], UIColor.whiteColor, 0.995)
+                        : SonoraBlendColor(resolved[3], UIColor.blackColor, 0.94))
+                       colorWithAlphaComponent:(lightTheme ? 0.040 : 0.12)] CGColor]
+    ];
+    if (animated) {
+        CABasicAnimation *vignetteAnim = [CABasicAnimation animationWithKeyPath:@"colors"];
+        vignetteAnim.fromValue = self.vignetteLayer.colors;
+        vignetteAnim.toValue = vignetteColors;
+        vignetteAnim.duration = 1.8;
+        vignetteAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.vignetteLayer addAnimation:vignetteAnim forKey:@"sonora_wave_vignette_colors"];
+    }
+    self.vignetteLayer.colors = vignetteColors;
+    [self updatePlaybackStateAnimated:NO];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (@available(iOS 13.0, *)) {
+        if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
+            [self applyPalette:(self.currentPalette ?: SonoraResolvedWavePalette(nil)) animated:NO];
+        }
+    }
+}
+
+- (void)configureLineGeometry {
+    CGFloat width = CGRectGetWidth(self.bounds);
+    CGFloat height = CGRectGetHeight(self.bounds);
+    if (width <= 1.0 || height <= 1.0) {
+        return;
+    }
+
+    CGFloat scale = MAX(0.92f, MIN(1.20f, MIN(width / 360.0f, height / 220.0f)));
+    NSArray<NSNumber *> *lineWidths = @[
+        @(2.8f * scale),
+        @(2.5f * scale),
+        @(2.2f * scale),
+        @(1.9f * scale),
+        @(1.7f * scale),
+        @(1.5f * scale),
+        @(1.2f * scale)
+    ];
+
+    [self.lineLayers enumerateObjectsUsingBlock:^(CAShapeLayer * _Nonnull line, NSUInteger idx, BOOL * _Nonnull stop) {
+        (void)stop;
+        line.frame = self.bounds;
+        line.lineWidth = lineWidths[idx].doubleValue;
+        line.path = [self contourPathForIndex:idx variant:0].CGPath;
+    }];
+}
+
+- (UIBezierPath *)contourPathForIndex:(NSUInteger)index variant:(NSUInteger)variant {
+    CGFloat width = CGRectGetWidth(self.bounds);
+    CGFloat height = CGRectGetHeight(self.bounds);
+    CGFloat count = MAX(1.0f, (CGFloat)(self.lineLayers.count - 1));
+    CGFloat progress = ((CGFloat)index) / count;
+    CGFloat phase = (self.pulseSeed * (CGFloat)(M_PI * 2.0)) + (((CGFloat)variant) * 0.86f) + (progress * 1.15f);
+
+    CGFloat centerX = (width * 0.50f) + (sinf(phase * 0.72f) * width * 0.018f);
+    CGFloat centerY = (height * 0.53f) + (cosf((phase * 0.54f) + 0.6f) * height * 0.022f);
+    CGFloat radiusX = width * (0.17f + (progress * 0.23f));
+    CGFloat radiusY = height * (0.13f + (progress * 0.17f));
+    CGFloat amplitude = MIN(width, height) * (0.014f + (progress * 0.010f));
+    NSUInteger pointCount = 56;
+
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    for (NSUInteger point = 0; point <= pointCount; point += 1) {
+        CGFloat angle = (((CGFloat)point) / ((CGFloat)pointCount)) * (CGFloat)(M_PI * 2.0);
+        CGFloat wobbleA = sinf((angle * 2.0f) + phase) * amplitude;
+        CGFloat wobbleB = cosf((angle * 3.0f) - (phase * 0.74f)) * amplitude * 0.54f;
+        CGFloat wobbleC = sinf((angle * 5.0f) + (phase * 1.12f)) * amplitude * 0.20f;
+        CGFloat x = centerX + (cosf(angle) * (radiusX + wobbleA + wobbleB));
+        CGFloat y = centerY + (sinf(angle) * (radiusY + (wobbleA * 0.72f) - (wobbleB * 0.16f) + wobbleC));
+        CGPoint p = CGPointMake(x, y);
+        if (point == 0) {
+            [path moveToPoint:p];
+        } else {
+            [path addLineToPoint:p];
+        }
+    }
+    [path closePath];
+    return path;
+}
+
+- (void)restartAnimations {
+    if (CGRectIsEmpty(self.bounds)) {
+        return;
+    }
+    self.hasStartedAnimations = YES;
+
+    CGFloat durationMultiplier = self.playing ? 1.0f : 1.28f;
+    [self.lineLayers enumerateObjectsUsingBlock:^(CAShapeLayer * _Nonnull line, NSUInteger idx, BOOL * _Nonnull stop) {
+        (void)stop;
+        [line removeAnimationForKey:@"sonora_wave_line_path"];
+        [line removeAnimationForKey:@"sonora_wave_line_scale"];
+        [line removeAnimationForKey:@"sonora_wave_line_rotation"];
+        [line removeAnimationForKey:@"sonora_wave_line_shadow"];
+        [line removeAnimationForKey:@"sonora_wave_line_opacity"];
+
+        UIBezierPath *path0 = [self contourPathForIndex:idx variant:0];
+        UIBezierPath *path1 = [self contourPathForIndex:idx variant:1];
+        UIBezierPath *path2 = [self contourPathForIndex:idx variant:2];
+        line.path = path0.CGPath;
+
+        CGFloat baseOpacity = self.playing
+        ? (idx < 2 ? 0.96f : (idx < 4 ? 0.82f : 0.66f))
+        : (idx < 2 ? 0.78f : (idx < 4 ? 0.64f : 0.52f));
+        CGFloat swing = self.playing ? 0.16f : 0.10f;
+        line.opacity = baseOpacity;
+
+        CAKeyframeAnimation *pathAnim = [CAKeyframeAnimation animationWithKeyPath:@"path"];
+        pathAnim.values = @[
+            (__bridge id)path0.CGPath,
+            (__bridge id)path1.CGPath,
+            (__bridge id)path2.CGPath,
+            (__bridge id)path0.CGPath
+        ];
+        pathAnim.keyTimes = @[@0.0, @0.34, @0.68, @1.0];
+        pathAnim.duration = (8.4 + (((CGFloat)idx) * 0.85f)) * durationMultiplier;
+        pathAnim.repeatCount = HUGE_VALF;
+        pathAnim.calculationMode = kCAAnimationLinear;
+        pathAnim.beginTime = CACurrentMediaTime() + (((CGFloat)idx) * 0.08f);
+        pathAnim.timingFunctions = @[
+            [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut],
+            [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut],
+            [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]
+        ];
+        [line addAnimation:pathAnim forKey:@"sonora_wave_line_path"];
+
+        CAKeyframeAnimation *opacityAnim = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+        opacityAnim.values = @[
+            @(baseOpacity - (swing * 0.35f)),
+            @(baseOpacity + swing),
+            @(baseOpacity - (swing * 0.18f)),
+            @(baseOpacity - (swing * 0.35f))
+        ];
+        opacityAnim.keyTimes = @[@0.0, @0.32, @0.70, @1.0];
+        opacityAnim.duration = (4.8 + (((CGFloat)idx) * 0.50)) * durationMultiplier;
+        opacityAnim.repeatCount = HUGE_VALF;
+        opacityAnim.beginTime = CACurrentMediaTime() + (((CGFloat)idx) * 0.08f);
+        opacityAnim.timingFunctions = @[
+            [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut],
+            [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut],
+            [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]
+        ];
+        [line addAnimation:opacityAnim forKey:@"sonora_wave_line_opacity"];
+
+        if (self.playing) {
+            CABasicAnimation *scaleAnim = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+            scaleAnim.fromValue = @(0.998f - (((CGFloat)idx) * 0.0008f));
+            scaleAnim.toValue = @(1.010f + (((CGFloat)idx) * 0.0012f));
+            scaleAnim.duration = 7.4 + (((CGFloat)idx) * 0.70f);
+            scaleAnim.autoreverses = YES;
+            scaleAnim.repeatCount = HUGE_VALF;
+            scaleAnim.beginTime = CACurrentMediaTime() + (((CGFloat)idx) * 0.06f);
+            scaleAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            [line addAnimation:scaleAnim forKey:@"sonora_wave_line_scale"];
+
+            CABasicAnimation *rotationAnim = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+            CGFloat rotation = 0.0016f + (((CGFloat)idx) * 0.0006f);
+            rotationAnim.fromValue = @(-rotation);
+            rotationAnim.toValue = @(rotation);
+            rotationAnim.duration = 12.2 + (((CGFloat)idx) * 0.80f);
+            rotationAnim.autoreverses = YES;
+            rotationAnim.repeatCount = HUGE_VALF;
+            rotationAnim.beginTime = CACurrentMediaTime() + (((CGFloat)idx) * 0.05f);
+            rotationAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            [line addAnimation:rotationAnim forKey:@"sonora_wave_line_rotation"];
+
+            CABasicAnimation *shadowAnim = [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
+            shadowAnim.fromValue = @(MAX(0.0f, line.shadowOpacity * 0.78f));
+            shadowAnim.toValue = @(MIN(1.0f, line.shadowOpacity + 0.18f));
+            shadowAnim.duration = 5.6 + (((CGFloat)idx) * 0.55f);
+            shadowAnim.autoreverses = YES;
+            shadowAnim.repeatCount = HUGE_VALF;
+            shadowAnim.beginTime = CACurrentMediaTime() + (((CGFloat)idx) * 0.04f);
+            shadowAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            [line addAnimation:shadowAnim forKey:@"sonora_wave_line_shadow"];
+        }
+    }];
+
+    [self.haloLayer removeAnimationForKey:@"sonora_wave_halo_scale"];
+    [self.haloLayer removeAnimationForKey:@"sonora_wave_halo_opacity"];
+    [self.coreGlowLayer removeAnimationForKey:@"sonora_wave_core_scale"];
+    [self.coreGlowLayer removeAnimationForKey:@"sonora_wave_core_opacity"];
+
+    CABasicAnimation *haloScale = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+    haloScale.fromValue = @(self.playing ? 0.96f : 0.985f);
+    haloScale.toValue = @(self.playing ? 1.08f : 1.03f);
+    haloScale.duration = self.playing ? 4.2 : 6.0;
+    haloScale.autoreverses = YES;
+    haloScale.repeatCount = HUGE_VALF;
+    haloScale.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.haloLayer addAnimation:haloScale forKey:@"sonora_wave_halo_scale"];
+
+    CABasicAnimation *haloOpacity = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    haloOpacity.fromValue = @(self.playing ? 0.80f : 0.64f);
+    haloOpacity.toValue = @(self.playing ? 1.0f : 0.82f);
+    haloOpacity.duration = self.playing ? 3.6 : 5.4;
+    haloOpacity.autoreverses = YES;
+    haloOpacity.repeatCount = HUGE_VALF;
+    haloOpacity.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.haloLayer addAnimation:haloOpacity forKey:@"sonora_wave_halo_opacity"];
+
+    CABasicAnimation *coreScale = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+    coreScale.fromValue = @(self.playing ? 0.92f : 0.96f);
+    coreScale.toValue = @(self.playing ? 1.04f : 1.01f);
+    coreScale.duration = self.playing ? 5.4 : 7.2;
+    coreScale.autoreverses = YES;
+    coreScale.repeatCount = HUGE_VALF;
+    coreScale.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.coreGlowLayer addAnimation:coreScale forKey:@"sonora_wave_core_scale"];
+
+    CABasicAnimation *coreOpacity = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    coreOpacity.fromValue = @(self.playing ? 0.52f : 0.38f);
+    coreOpacity.toValue = @(self.playing ? 0.82f : 0.58f);
+    coreOpacity.duration = self.playing ? 4.8 : 6.6;
+    coreOpacity.autoreverses = YES;
+    coreOpacity.repeatCount = HUGE_VALF;
+    coreOpacity.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.coreGlowLayer addAnimation:coreOpacity forKey:@"sonora_wave_core_opacity"];
+
+}
+
+- (void)transitionToUpdatedGeometry {
+    if (CGRectIsEmpty(self.bounds)) {
+        return;
+    }
+    if (!self.hasStartedAnimations) {
+        [self configureLineGeometry];
+        return;
+    }
+
+    self.geometryTransitionGeneration += 1;
+    NSUInteger generation = self.geometryTransitionGeneration;
+    CGFloat duration = self.playing ? 1.02f : 1.16f;
+    CGFloat scale = MAX(0.92f, MIN(1.20f, MIN(CGRectGetWidth(self.bounds) / 360.0f, CGRectGetHeight(self.bounds) / 220.0f)));
+    NSArray<NSNumber *> *lineWidths = @[
+        @(2.8f * scale),
+        @(2.5f * scale),
+        @(2.2f * scale),
+        @(1.9f * scale),
+        @(1.7f * scale),
+        @(1.5f * scale),
+        @(1.2f * scale)
+    ];
+
+    [self.lineLayers enumerateObjectsUsingBlock:^(CAShapeLayer * _Nonnull line, NSUInteger idx, BOOL * _Nonnull stop) {
+        (void)stop;
+        UIBezierPath *targetPath = [self contourPathForIndex:idx variant:0];
+        CGPathRef currentPath = ((CAShapeLayer *)line.presentationLayer).path ?: line.path;
+        CGFloat currentWidth = ((CAShapeLayer *)line.presentationLayer).lineWidth > 0.0f
+        ? ((CAShapeLayer *)line.presentationLayer).lineWidth
+        : line.lineWidth;
+        CGFloat currentOpacity = ((CAShapeLayer *)line.presentationLayer).opacity > 0.0f
+        ? ((CAShapeLayer *)line.presentationLayer).opacity
+        : line.opacity;
+        CGFloat currentShadowOpacity = ((CAShapeLayer *)line.presentationLayer).shadowOpacity > 0.0f
+        ? ((CAShapeLayer *)line.presentationLayer).shadowOpacity
+        : line.shadowOpacity;
+        CGFloat targetWidth = lineWidths[idx].doubleValue;
+
+        [line removeAnimationForKey:@"sonora_wave_line_path"];
+        [line removeAnimationForKey:@"sonora_wave_line_scale"];
+        [line removeAnimationForKey:@"sonora_wave_line_rotation"];
+        [line removeAnimationForKey:@"sonora_wave_line_shadow"];
+        [line removeAnimationForKey:@"sonora_wave_line_opacity"];
+        [line removeAnimationForKey:@"sonora_wave_line_transition"];
+        [line removeAnimationForKey:@"sonora_wave_line_width_transition"];
+
+        if (currentPath != NULL) {
+            CABasicAnimation *pathTransition = [CABasicAnimation animationWithKeyPath:@"path"];
+            pathTransition.fromValue = (__bridge id)currentPath;
+            pathTransition.toValue = (__bridge id)targetPath.CGPath;
+            pathTransition.duration = duration;
+            pathTransition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            [line addAnimation:pathTransition forKey:@"sonora_wave_line_transition"];
+        }
+
+        CABasicAnimation *widthTransition = [CABasicAnimation animationWithKeyPath:@"lineWidth"];
+        widthTransition.fromValue = @(currentWidth);
+        widthTransition.toValue = @(targetWidth);
+        widthTransition.duration = duration;
+        widthTransition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [line addAnimation:widthTransition forKey:@"sonora_wave_line_width_transition"];
+
+        line.opacity = currentOpacity;
+        line.shadowOpacity = currentShadowOpacity;
+        line.lineWidth = targetWidth;
+        line.path = targetPath.CGPath;
+    }];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((duration + 0.04f) * (CGFloat)NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.geometryTransitionGeneration != generation) {
+            return;
+        }
+        [self restartAnimations];
+    });
+}
+
+- (void)updatePlaybackStateAnimated:(BOOL)animated {
+    CGFloat haloOpacity = self.playing ? 0.94f : 0.78f;
+    CGFloat coreOpacity = self.playing ? 0.74f : 0.50f;
+    CGFloat lineOpacity = self.playing ? 1.0f : 0.92f;
+    if (animated) {
+        CABasicAnimation *haloAnim = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        haloAnim.fromValue = @(self.haloLayer.opacity);
+        haloAnim.toValue = @(haloOpacity);
+        haloAnim.duration = 0.28;
+        [self.haloLayer addAnimation:haloAnim forKey:@"sonora_wave_state_halo_opacity"];
+
+        CABasicAnimation *containerAnim = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        containerAnim.fromValue = @(self.lineContainerLayer.opacity);
+        containerAnim.toValue = @(lineOpacity);
+        containerAnim.duration = 0.28;
+        [self.lineContainerLayer addAnimation:containerAnim forKey:@"sonora_wave_state_line_opacity"];
+
+        CABasicAnimation *coreAnim = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        coreAnim.fromValue = @(self.coreGlowLayer.opacity);
+        coreAnim.toValue = @(coreOpacity);
+        coreAnim.duration = 0.28;
+        [self.coreGlowLayer addAnimation:coreAnim forKey:@"sonora_wave_state_core_opacity"];
+    }
+    self.haloLayer.opacity = haloOpacity;
+    self.coreGlowLayer.opacity = coreOpacity;
+    self.lineContainerLayer.opacity = lineOpacity;
+}
+
+@end
+
+
+
+@interface SonoraWaveNebulaBackgroundView : UIView
+
+- (void)applyPalette:(NSArray<UIColor *> *)palette animated:(BOOL)animated;
+- (void)setPlaying:(BOOL)playing;
+- (void)setPulseSeedWithTrackIdentifier:(NSString * _Nullable)identifier;
+
+@end
+
+@interface SonoraWaveNebulaBackgroundView ()
 
 @property (nonatomic, strong) CAGradientLayer *baseGradientLayer;
 @property (nonatomic, strong) CALayer *blobContainerLayer;
@@ -568,7 +1231,7 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
 
 @end
 
-@implementation SonoraWaveAnimatedBackgroundView
+@implementation SonoraWaveNebulaBackgroundView
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -912,7 +1575,9 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
 
 @interface SonoraHomeHeroRecommendationCell ()
 
-@property (nonatomic, strong) SonoraWaveAnimatedBackgroundView *waveBackgroundView;
+@property (nonatomic, strong) UIView *waveBackgroundContainer;
+@property (nonatomic, strong) SonoraWaveAnimatedBackgroundView *contourWaveBackgroundView;
+@property (nonatomic, strong) SonoraWaveNebulaBackgroundView *nebulaWaveBackgroundView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIButton *playButton;
 @property (nonatomic, assign) BOOL playing;
@@ -934,14 +1599,23 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
     self.contentView.layer.cornerRadius = 0.0;
     self.contentView.layer.masksToBounds = YES;
 
-    SonoraWaveAnimatedBackgroundView *waveBackgroundView = [[SonoraWaveAnimatedBackgroundView alloc] init];
-    waveBackgroundView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.waveBackgroundView = waveBackgroundView;
+    UIView *waveBackgroundContainer = [[UIView alloc] init];
+    waveBackgroundContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    waveBackgroundContainer.userInteractionEnabled = NO;
+    self.waveBackgroundContainer = waveBackgroundContainer;
+
+    SonoraWaveNebulaBackgroundView *nebulaWaveBackgroundView = [[SonoraWaveNebulaBackgroundView alloc] init];
+    nebulaWaveBackgroundView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.nebulaWaveBackgroundView = nebulaWaveBackgroundView;
+
+    SonoraWaveAnimatedBackgroundView *contourWaveBackgroundView = [[SonoraWaveAnimatedBackgroundView alloc] init];
+    contourWaveBackgroundView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.contourWaveBackgroundView = contourWaveBackgroundView;
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     titleLabel.font = SonoraNotoSerifBoldFont(30.0);
-    titleLabel.textColor = UIColor.whiteColor;
+    titleLabel.textColor = UIColor.labelColor;
     titleLabel.numberOfLines = 1;
     titleLabel.text = @"My wave";
     self.titleLabel = titleLabel;
@@ -951,8 +1625,10 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
     playButton.backgroundColor = UIColor.clearColor;
     playButton.layer.cornerRadius = 0.0;
     playButton.layer.masksToBounds = NO;
-    playButton.tintColor = [UIColor colorWithWhite:1.0 alpha:0.96];
-    [playButton setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.96] forState:UIControlStateNormal];
+    playButton.tintColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+        return [UIColor.labelColor colorWithAlphaComponent:(trait.userInterfaceStyle == UIUserInterfaceStyleLight ? 0.88 : 0.96)];
+    }];
+    [playButton setTitleColor:playButton.tintColor forState:UIControlStateNormal];
     playButton.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
     playButton.titleLabel.lineBreakMode = NSLineBreakByClipping;
     playButton.titleLabel.adjustsFontSizeToFitWidth = NO;
@@ -964,15 +1640,27 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
     [playButton addTarget:self action:@selector(playButtonTapped) forControlEvents:UIControlEventTouchUpInside];
     self.playButton = playButton;
 
-    [self.contentView addSubview:waveBackgroundView];
+    [waveBackgroundContainer addSubview:nebulaWaveBackgroundView];
+    [waveBackgroundContainer addSubview:contourWaveBackgroundView];
+    [self.contentView addSubview:waveBackgroundContainer];
     [self.contentView addSubview:titleLabel];
     [self.contentView addSubview:playButton];
 
     [NSLayoutConstraint activateConstraints:@[
-        [waveBackgroundView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
-        [waveBackgroundView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
-        [waveBackgroundView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
-        [waveBackgroundView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+        [waveBackgroundContainer.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:24.0],
+        [waveBackgroundContainer.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:8.0],
+        [waveBackgroundContainer.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-8.0],
+        [waveBackgroundContainer.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-16.0],
+
+        [nebulaWaveBackgroundView.topAnchor constraintEqualToAnchor:waveBackgroundContainer.topAnchor],
+        [nebulaWaveBackgroundView.leadingAnchor constraintEqualToAnchor:waveBackgroundContainer.leadingAnchor],
+        [nebulaWaveBackgroundView.trailingAnchor constraintEqualToAnchor:waveBackgroundContainer.trailingAnchor],
+        [nebulaWaveBackgroundView.bottomAnchor constraintEqualToAnchor:waveBackgroundContainer.bottomAnchor],
+
+        [contourWaveBackgroundView.topAnchor constraintEqualToAnchor:waveBackgroundContainer.topAnchor],
+        [contourWaveBackgroundView.leadingAnchor constraintEqualToAnchor:waveBackgroundContainer.leadingAnchor],
+        [contourWaveBackgroundView.trailingAnchor constraintEqualToAnchor:waveBackgroundContainer.trailingAnchor],
+        [contourWaveBackgroundView.bottomAnchor constraintEqualToAnchor:waveBackgroundContainer.bottomAnchor],
 
         [titleLabel.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor],
         [titleLabel.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor constant:-16.0],
@@ -984,7 +1672,9 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
         [playButton.heightAnchor constraintEqualToConstant:38.0],
         [playButton.widthAnchor constraintGreaterThanOrEqualToConstant:92.0]
     ]];
+    [self updateThemeColors];
     [self updatePlayButton];
+    [self updateWaveLookAnimated:NO];
 }
 
 - (void)prepareForReuse {
@@ -992,8 +1682,10 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
     self.titleLabel.text = @"My wave";
     self.playHandler = nil;
     self.playing = NO;
-    [self.waveBackgroundView setPlaying:NO];
+    [self.contourWaveBackgroundView setPlaying:NO];
+    [self.nebulaWaveBackgroundView setPlaying:NO];
     [self updatePlayButton];
+    [self updateWaveLookAnimated:NO];
 }
 
 - (void)playButtonTapped {
@@ -1004,14 +1696,30 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
 
 - (void)configureWithTrack:(SonoraTrack *)track {
     NSArray<UIColor *> *palette = SonoraResolvedWavePalette(track.artwork);
-    [self.waveBackgroundView setPulseSeedWithTrackIdentifier:track.identifier];
-    [self.waveBackgroundView setPlaying:self.playing];
-    [self.waveBackgroundView applyPalette:palette animated:YES];
+    [self updateThemeColors];
+    [self updateWaveLookAnimated:NO];
+    if (SonoraCurrentMyWaveLook() == SonoraMyWaveLookClouds) {
+        [self.contourWaveBackgroundView setPlaying:NO];
+        [self.nebulaWaveBackgroundView setPulseSeedWithTrackIdentifier:track.identifier];
+        [self.nebulaWaveBackgroundView setPlaying:self.playing];
+        [self.nebulaWaveBackgroundView applyPalette:palette animated:YES];
+    } else {
+        [self.nebulaWaveBackgroundView setPlaying:NO];
+        [self.contourWaveBackgroundView setPulseSeedWithTrackIdentifier:track.identifier];
+        [self.contourWaveBackgroundView setPlaying:self.playing];
+        [self.contourWaveBackgroundView applyPalette:palette animated:YES];
+    }
 }
 
 - (void)setPlaying:(BOOL)playing {
     _playing = playing;
-    [self.waveBackgroundView setPlaying:playing];
+    if (SonoraCurrentMyWaveLook() == SonoraMyWaveLookClouds) {
+        [self.contourWaveBackgroundView setPlaying:NO];
+        [self.nebulaWaveBackgroundView setPlaying:playing];
+    } else {
+        [self.nebulaWaveBackgroundView setPlaying:NO];
+        [self.contourWaveBackgroundView setPlaying:playing];
+    }
     [self updatePlayButton];
 }
 
@@ -1023,6 +1731,48 @@ static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) 
     UIImage *image = [UIImage systemImageNamed:symbol withConfiguration:config];
     [self.playButton setImage:image forState:UIControlStateNormal];
     [self.playButton setTitle:title forState:UIControlStateNormal];
+}
+
+- (void)updateThemeColors {
+    self.titleLabel.textColor = UIColor.labelColor;
+    UIColor *buttonColor = [UIColor.labelColor colorWithAlphaComponent:(self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleLight ? 0.88 : 0.96)];
+    self.playButton.tintColor = buttonColor;
+    [self.playButton setTitleColor:buttonColor forState:UIControlStateNormal];
+}
+
+- (void)updateWaveLookAnimated:(BOOL)animated {
+    UIView *showView = (SonoraCurrentMyWaveLook() == SonoraMyWaveLookClouds) ? self.nebulaWaveBackgroundView : self.contourWaveBackgroundView;
+    UIView *hideView = (SonoraCurrentMyWaveLook() == SonoraMyWaveLookClouds) ? self.contourWaveBackgroundView : self.nebulaWaveBackgroundView;
+    hideView.hidden = NO;
+    showView.hidden = NO;
+
+    void (^changes)(void) = ^{
+        showView.alpha = 1.0f;
+        hideView.alpha = 0.0f;
+    };
+
+    if (animated) {
+        [UIView animateWithDuration:0.26
+                              delay:0.0
+                            options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
+                         animations:changes
+                         completion:^(__unused BOOL finished) {
+            hideView.hidden = YES;
+        }];
+    } else {
+        changes();
+        hideView.hidden = YES;
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (@available(iOS 13.0, *)) {
+        if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
+            [self updateThemeColors];
+            [self updateWaveLookAnimated:NO];
+        }
+    }
 }
 
 @end
@@ -1700,6 +2450,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 
 @property (nonatomic, strong) UISegmentedControl *fontControl;
 @property (nonatomic, strong) UISegmentedControl *artworkStyleControl;
+@property (nonatomic, strong) UISegmentedControl *myWaveLookControl;
 @property (nonatomic, strong) UISwitch *artworkEqualizerSwitch;
 @property (nonatomic, strong) UISwitch *preservePlayerModesSwitch;
 @property (nonatomic, strong) UISwitch *onlinePlaylistCacheTracksSwitch;
@@ -1711,6 +2462,14 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 @property (nonatomic, strong) UILabel *onlinePlaylistCacheValueLabel;
 @property (nonatomic, strong, nullable) NSURL *pendingBackupExportURL;
 @property (nonatomic, assign) BOOL backupPickerImportMode;
+
+- (UIView *)selectableValueRowWithTitle:(NSString *)title
+                               subtitle:(NSString *)subtitle
+                             valueLabel:(UILabel *)valueLabel
+                                 action:(SEL)action;
+- (UIView *)infoRowWithTitle:(NSString *)title
+                       value:(NSString *)value
+                  valueLabel:(UILabel * _Nullable)valueLabel;
 
 @end
 
@@ -1776,6 +2535,13 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     [customizationStack addArrangedSubview:[self segmentedRowWithTitle:@"Artwork style"
                                                               subtitle:@"Cover corners in player"
                                                                control:artworkStyleControl]];
+
+    UISegmentedControl *myWaveLookControl = [[UISegmentedControl alloc] initWithItems:@[@"Clouds", @"Contours"]];
+    [myWaveLookControl addTarget:self action:@selector(myWaveLookChanged:) forControlEvents:UIControlEventValueChanged];
+    self.myWaveLookControl = myWaveLookControl;
+    [customizationStack addArrangedSubview:[self segmentedRowWithTitle:@"My Wave look"
+                                                              subtitle:@"Previous clouds or contour rings on Home"
+                                                               control:myWaveLookControl]];
 
     UILabel *accentColorValue = [self valueLabel];
     self.accentColorValueLabel = accentColorValue;
@@ -2027,12 +2793,13 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     return row;
 }
 
-- (UIControl *)selectableValueRowWithTitle:(NSString *)title
-                                  subtitle:(NSString *)subtitle
-                                valueLabel:(UILabel *)valueLabel
-                                    action:(SEL)action {
+- (UIView *)selectableValueRowWithTitle:(NSString *)title
+                               subtitle:(NSString *)subtitle
+                             valueLabel:(UILabel *)valueLabel
+                                 action:(SEL)action {
     UIControl *row = [[UIControl alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
+    row.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     [row addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
 
     UILabel *titleLabel = [[UILabel alloc] init];
@@ -2048,38 +2815,42 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     subtitleLabel.textColor = UIColor.secondaryLabelColor;
     subtitleLabel.text = subtitle;
     subtitleLabel.numberOfLines = 2;
+    subtitleLabel.hidden = (subtitle.length == 0);
 
-    UILabel *chevronLabel = [[UILabel alloc] init];
-    chevronLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    chevronLabel.text = @"›";
-    chevronLabel.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightRegular];
-    chevronLabel.textColor = UIColor.tertiaryLabelColor;
+    UIStackView *textStack = [[UIStackView alloc] initWithArrangedSubviews:(subtitleLabel.hidden ? @[titleLabel] : @[titleLabel, subtitleLabel])];
+    textStack.translatesAutoresizingMaskIntoConstraints = NO;
+    textStack.axis = UILayoutConstraintAxisVertical;
+    textStack.spacing = 2.0;
+    textStack.alignment = UIStackViewAlignmentFill;
 
     valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
     valueLabel.textAlignment = NSTextAlignmentRight;
+    [valueLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [valueLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
 
-    [row addSubview:titleLabel];
-    [row addSubview:subtitleLabel];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"]];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    chevron.contentMode = UIViewContentModeScaleAspectFit;
+    chevron.tintColor = UIColor.tertiaryLabelColor;
+
+    [row addSubview:textStack];
     [row addSubview:valueLabel];
-    [row addSubview:chevronLabel];
+    [row addSubview:chevron];
 
     [NSLayoutConstraint activateConstraints:@[
-        [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:valueLabel.leadingAnchor constant:-8.0],
+        [textStack.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [textStack.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [textStack.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
 
-        [valueLabel.trailingAnchor constraintEqualToAnchor:chevronLabel.leadingAnchor constant:-4.0],
-        [valueLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+        [chevron.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [chevron.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [chevron.widthAnchor constraintEqualToConstant:11.0],
+        [chevron.heightAnchor constraintEqualToConstant:15.0],
 
-        [chevronLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [chevronLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
-
-        [subtitleLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:2.0],
-        [subtitleLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
-        [subtitleLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [subtitleLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
+        [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:textStack.trailingAnchor constant:10.0],
+        [valueLabel.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-8.0],
+        [valueLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor]
     ]];
-
     return row;
 }
 
@@ -2091,33 +2862,31 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
-    titleLabel.textColor = UIColor.secondaryLabelColor;
+    titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = UIColor.labelColor;
     titleLabel.text = title;
     titleLabel.numberOfLines = 1;
 
-    UILabel *valueTextLabel = valueLabel ?: [[UILabel alloc] init];
-    valueTextLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    valueTextLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
-    valueTextLabel.textColor = UIColor.labelColor;
-    valueTextLabel.text = value;
-    valueTextLabel.numberOfLines = 1;
-    valueTextLabel.textAlignment = NSTextAlignmentRight;
+    UILabel *resolvedValueLabel = valueLabel ?: [self valueLabel];
+    resolvedValueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    resolvedValueLabel.text = value;
+    resolvedValueLabel.textAlignment = NSTextAlignmentRight;
+    resolvedValueLabel.numberOfLines = 1;
+    [resolvedValueLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [resolvedValueLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
 
     [row addSubview:titleLabel];
-    [row addSubview:valueTextLabel];
+    [row addSubview:resolvedValueLabel];
+
     [NSLayoutConstraint activateConstraints:@[
         [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
         [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [titleLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:valueTextLabel.leadingAnchor constant:-8.0],
 
-        [valueTextLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [valueTextLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor]
+        [resolvedValueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:12.0],
+        [resolvedValueLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [resolvedValueLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor]
     ]];
-    if (valueLabel != nil) {
-        valueLabel.text = value;
-    }
     return row;
 }
 
@@ -2125,6 +2894,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     NSInteger font = [defaults objectForKey:SonoraSettingsFontKey] ? [defaults integerForKey:SonoraSettingsFontKey] : 0;
     NSInteger artworkStyle = [defaults objectForKey:SonoraSettingsArtworkStyleKey] ? [defaults integerForKey:SonoraSettingsArtworkStyleKey] : 1;
+    NSInteger myWaveLook = [defaults objectForKey:SonoraSettingsMyWaveLookKey] ? [defaults integerForKey:SonoraSettingsMyWaveLookKey] : SonoraMyWaveLookContours;
     BOOL artworkEqualizerEnabled = [defaults objectForKey:SonoraSettingsArtworkEqualizerKey] ? [defaults boolForKey:SonoraSettingsArtworkEqualizerKey] : YES;
     BOOL preserveModes = [defaults objectForKey:SonoraSettingsPreservePlayerModesKey] ? [defaults boolForKey:SonoraSettingsPreservePlayerModesKey] : YES;
     double trackGap = [defaults objectForKey:SonoraSettingsTrackGapKey] ? [defaults doubleForKey:SonoraSettingsTrackGapKey] : 0.0;
@@ -2136,9 +2906,13 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         font = 0;
         [defaults setInteger:font forKey:SonoraSettingsFontKey];
     }
-
+    if (myWaveLook != SonoraMyWaveLookClouds && myWaveLook != SonoraMyWaveLookContours) {
+        myWaveLook = SonoraMyWaveLookContours;
+        [defaults setInteger:myWaveLook forKey:SonoraSettingsMyWaveLookKey];
+    }
     self.fontControl.selectedSegmentIndex = MAX(0, MIN(1, font));
     self.artworkStyleControl.selectedSegmentIndex = MAX(0, MIN(1, artworkStyle));
+    self.myWaveLookControl.selectedSegmentIndex = myWaveLook;
     self.artworkEqualizerSwitch.on = artworkEqualizerEnabled;
     self.preservePlayerModesSwitch.on = preserveModes;
     self.onlinePlaylistCacheTracksSwitch.on = cacheOnlinePlaylistTracks;
@@ -2163,6 +2937,12 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 
 - (void)artworkStyleChanged:(UISegmentedControl *)sender {
     [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:SonoraSettingsArtworkStyleKey];
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)myWaveLookChanged:(UISegmentedControl *)sender {
+    NSInteger look = MAX((NSInteger)SonoraMyWaveLookClouds, MIN((NSInteger)SonoraMyWaveLookContours, sender.selectedSegmentIndex));
+    [NSUserDefaults.standardUserDefaults setInteger:look forKey:SonoraSettingsMyWaveLookKey];
     [self notifyPlayerSettingsChanged];
 }
 
@@ -3454,6 +4234,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 @property (nonatomic, copy) NSArray<SonoraTrack *> *freshTracks;
 @property (nonatomic, copy) NSString *lastForYouTopTrackID;
 @property (nonatomic, copy) NSString *forYouSelectedTrackID;
+@property (nonatomic, copy) NSString *homeRecommendationsSessionSignature;
 @property (nonatomic, assign) NSInteger forYouSelectionVisit;
 @property (nonatomic, assign) NSInteger homeVisitCount;
 
@@ -3479,6 +4260,10 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
                                            selector:@selector(handlePlaybackStateChanged)
                                                name:SonoraPlaybackStateDidChangeNotification
                                              object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(handlePlayerSettingsChanged)
+                                               name:SonoraPlayerSettingsDidChangeNotification
+                                             object:nil];
     self.forYouSelectionVisit = NSIntegerMin;
 }
 
@@ -3500,6 +4285,26 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     }
 
     [collectionView reloadData];
+}
+
+- (void)handlePlayerSettingsChanged {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self handlePlayerSettingsChanged];
+        });
+        return;
+    }
+
+    if (self.collectionView == nil) {
+        return;
+    }
+
+    if (self.recommendationTracks.count > 0) {
+        NSIndexSet *sections = [NSIndexSet indexSetWithIndex:SonoraHomeSectionTypeForYou];
+        [self.collectionView reloadSections:sections];
+    } else {
+        [self.collectionView reloadData];
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -3714,6 +4519,27 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 
     [self.collectionView reloadData];
     [self updateEmptyStateIfNeeded];
+}
+
+- (NSString *)recommendationsSessionSignatureForTracks:(NSArray<SonoraTrack *> *)tracks {
+    if (tracks.count == 0) {
+        return @"0";
+    }
+
+    NSMutableString *seed = [NSMutableString stringWithCapacity:(tracks.count * 18)];
+    [seed appendFormat:@"%lu|", (unsigned long)tracks.count];
+    for (SonoraTrack *track in tracks) {
+        NSString *identifier = track.identifier;
+        if (identifier.length > 0) {
+            [seed appendString:identifier];
+        } else if (track.url.lastPathComponent.length > 0) {
+            [seed appendString:track.url.lastPathComponent];
+        } else {
+            [seed appendString:SonoraDisplayTrackTitle(track)];
+        }
+        [seed appendString:@"|"];
+    }
+    return SonoraHomeStableHashString(seed) ?: @"0";
 }
 
 - (NSArray<SonoraTrack *> *)buildForYouTracksFromTracks:(NSArray<SonoraTrack *> *)tracks limit:(NSUInteger)limit {
@@ -4242,7 +5068,6 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         }
     }
 
-@property (nonatomic, copy) NSString *homeRecommendationsSessionSignature;
     if (matchedTracks.count == 0) {
         return @[];
     }
@@ -4273,24 +5098,3 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 }
 
 @end
-- (NSString *)recommendationsSessionSignatureForTracks:(NSArray<SonoraTrack *> *)tracks {
-    if (tracks.count == 0) {
-        return @"0";
-    }
-
-    NSMutableString *seed = [NSMutableString stringWithCapacity:(tracks.count * 18)];
-    [seed appendFormat:@"%lu|", (unsigned long)tracks.count];
-    for (SonoraTrack *track in tracks) {
-        NSString *identifier = track.identifier;
-        if (identifier.length > 0) {
-            [seed appendString:identifier];
-        } else if (track.url.lastPathComponent.length > 0) {
-            [seed appendString:track.url.lastPathComponent];
-        } else {
-            [seed appendString:SonoraDisplayTrackTitle(track)];
-        }
-        [seed appendString:@"|"];
-    }
-    return SonoraHomeStableHashString(seed) ?: @"0";
-}
-
