@@ -938,6 +938,13 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
 }
 
 - (void)reloadCollections {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self reloadCollections];
+        });
+        return;
+    }
+
     SonoraPlaylistStore *playlistStore = SonoraPlaylistStore.sharedStore;
     [playlistStore reloadPlaylists];
     NSMutableArray<SonoraPlaylist *> *playlists = [(playlistStore.playlists ?: @[]) mutableCopy];

@@ -48,6 +48,7 @@ static NSString * const SonoraSettingsOnlinePlaylistCacheMaxMBKey = @"sonora.set
 static NSString * const SonoraSharedPlaylistSyntheticPrefix = @"shared:";
 static NSString * const SonoraSharedPlaylistDeepLinkHost = @"playlist";
 static NSString * const SonoraSharedPlaylistDeepLinkPath = @"/shared";
+static NSString * const SonoraSharedPlaylistSuppressDidChangeNotificationThreadKey = @"sonora.sharedPlaylists.suppressDidChangeNotification";
 
 static void SonoraPresentAlert(UIViewController *controller, NSString *title, NSString *message);
 static NSString *SonoraSharedPlaylistSyntheticID(NSString *remoteID);
@@ -132,6 +133,39 @@ static SonoraSharedPlaylistSnapshot * _Nullable SonoraSharedPlaylistSnapshotFrom
     return snapshot;
 }
 
+static BOOL SonoraSharedPlaylistShouldSuppressDidChangeNotification(void) {
+    return [NSThread.currentThread.threadDictionary[SonoraSharedPlaylistSuppressDidChangeNotificationThreadKey] boolValue];
+}
+
+static void SonoraSharedPlaylistPerformWithoutDidChangeNotification(dispatch_block_t block) {
+    if (block == nil) {
+        return;
+    }
+    NSMutableDictionary<NSString *, id> *threadDictionary = NSThread.currentThread.threadDictionary;
+    id previousValue = threadDictionary[SonoraSharedPlaylistSuppressDidChangeNotificationThreadKey];
+    threadDictionary[SonoraSharedPlaylistSuppressDidChangeNotificationThreadKey] = @YES;
+    @try {
+        block();
+    } @finally {
+        if (previousValue != nil) {
+            threadDictionary[SonoraSharedPlaylistSuppressDidChangeNotificationThreadKey] = previousValue;
+        } else {
+            [threadDictionary removeObjectForKey:SonoraSharedPlaylistSuppressDidChangeNotificationThreadKey];
+        }
+    }
+}
+
+static void SonoraSharedPlaylistPostDidChangeNotification(void) {
+    void (^postNotification)(void) = ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:SonoraPlaylistsDidChangeNotification object:nil];
+    };
+    if (NSThread.isMainThread) {
+        postNotification();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), postNotification);
+    }
+}
+
 static void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snapshot) {
     if (snapshot == nil) {
         return;
@@ -143,7 +177,9 @@ static void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot
     }
     void (^persistSnapshotIfNeeded)(void) = ^{
         if ([store respondsToSelector:@selector(saveSnapshot:)]) {
-            [store performSelector:@selector(saveSnapshot:) withObject:snapshot];
+            SonoraSharedPlaylistPerformWithoutDidChangeNotification(^{
+                [store performSelector:@selector(saveSnapshot:) withObject:snapshot];
+            });
         }
     };
     if (snapshot.coverImage == nil && snapshot.coverURL.length > 0) {
@@ -346,7 +382,9 @@ BOOL SonoraHandleMusicModuleDeepLinkURL(NSURL *url) {
             snapshot = cachedSnapshot;
         } else if (snapshot != nil && cachedSnapshot != nil) {
             if ([sharedPlaylistStore respondsToSelector:@selector(saveSnapshot:)]) {
-                [sharedPlaylistStore performSelector:@selector(saveSnapshot:) withObject:snapshot];
+                SonoraSharedPlaylistPerformWithoutDidChangeNotification(^{
+                    [sharedPlaylistStore performSelector:@selector(saveSnapshot:) withObject:snapshot];
+                });
             }
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 SonoraSharedPlaylistWarmPersistentCache(snapshot);
@@ -4011,7 +4049,9 @@ static void SonoraPresentSleepTimerActionSheet(UIViewController *controller,
     [stored insertObject:[dictionary copy] atIndex:0];
     [NSUserDefaults.standardUserDefaults setObject:[stored copy] forKey:SonoraSharedPlaylistDefaultsKey];
     [NSUserDefaults.standardUserDefaults synchronize];
-    [NSNotificationCenter.defaultCenter postNotificationName:SonoraPlaylistsDidChangeNotification object:nil];
+    if (!SonoraSharedPlaylistShouldSuppressDidChangeNotification()) {
+        SonoraSharedPlaylistPostDidChangeNotification();
+    }
 }
 
 - (void)removeSnapshotForPlaylistID:(NSString *)playlistID {
@@ -4052,7 +4092,9 @@ static void SonoraPresentSleepTimerActionSheet(UIViewController *controller,
     [stored removeObjectsAtIndexes:matches];
     [NSUserDefaults.standardUserDefaults setObject:[stored copy] forKey:SonoraSharedPlaylistDefaultsKey];
     [NSUserDefaults.standardUserDefaults synchronize];
-    [NSNotificationCenter.defaultCenter postNotificationName:SonoraPlaylistsDidChangeNotification object:nil];
+    if (!SonoraSharedPlaylistShouldSuppressDidChangeNotification()) {
+        SonoraSharedPlaylistPostDidChangeNotification();
+    }
 }
 
 @end
@@ -8637,7 +8679,9 @@ replacementString:(NSString *)string {
             if ([SonoraSharedPlaylistStore.sharedStore isSnapshotLikedForPlaylistID:snapshot.playlistID]) {
                 SonoraSharedPlaylistSnapshot *snapshotToPersist = snapshot;
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    [SonoraSharedPlaylistStore.sharedStore saveSnapshot:snapshotToPersist];
+                    SonoraSharedPlaylistPerformWithoutDidChangeNotification(^{
+                        [SonoraSharedPlaylistStore.sharedStore saveSnapshot:snapshotToPersist];
+                    });
                 });
             }
         });
@@ -8692,7 +8736,9 @@ replacementString:(NSString *)string {
             if (snapshot != nil && [SonoraSharedPlaylistStore.sharedStore isSnapshotLikedForPlaylistID:snapshot.playlistID]) {
                 SonoraSharedPlaylistSnapshot *snapshotToPersist = snapshot;
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    [SonoraSharedPlaylistStore.sharedStore saveSnapshot:snapshotToPersist];
+                    SonoraSharedPlaylistPerformWithoutDidChangeNotification(^{
+                        [SonoraSharedPlaylistStore.sharedStore saveSnapshot:snapshotToPersist];
+                    });
                 });
             }
             NSUInteger row = [strongSelf.filteredTracks indexOfObjectPassingTest:^BOOL(SonoraTrack * _Nonnull candidate, NSUInteger idx, BOOL * _Nonnull stop) {
