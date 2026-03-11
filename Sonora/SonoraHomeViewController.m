@@ -3701,8 +3701,16 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 
     self.allTracks = tracks ?: @[];
     self.recommendationTracks = [self buildForYouTracksFromTracks:self.allTracks limit:120];
-    self.needThisTracks = [self buildRecommendationsFromTracks:self.allTracks limit:12];
-    self.freshTracks = [self buildFreshChoiceTracksFromTracks:self.allTracks limit:12];
+    NSString *sessionSignature = [self recommendationsSessionSignatureForTracks:self.allTracks];
+    BOOL shouldRefreshRecommendations =
+    (self.needThisTracks.count == 0 ||
+     self.freshTracks.count == 0 ||
+     ![self.homeRecommendationsSessionSignature isEqualToString:sessionSignature]);
+    if (shouldRefreshRecommendations) {
+        self.needThisTracks = [self buildRecommendationsFromTracks:self.allTracks limit:12];
+        self.freshTracks = [self buildFreshChoiceTracksFromTracks:self.allTracks limit:12];
+        self.homeRecommendationsSessionSignature = sessionSignature;
+    }
 
     [self.collectionView reloadData];
     [self updateEmptyStateIfNeeded];
@@ -4234,6 +4242,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         }
     }
 
+@property (nonatomic, copy) NSString *homeRecommendationsSessionSignature;
     if (matchedTracks.count == 0) {
         return @[];
     }
@@ -4264,3 +4273,24 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 }
 
 @end
+- (NSString *)recommendationsSessionSignatureForTracks:(NSArray<SonoraTrack *> *)tracks {
+    if (tracks.count == 0) {
+        return @"0";
+    }
+
+    NSMutableString *seed = [NSMutableString stringWithCapacity:(tracks.count * 18)];
+    [seed appendFormat:@"%lu|", (unsigned long)tracks.count];
+    for (SonoraTrack *track in tracks) {
+        NSString *identifier = track.identifier;
+        if (identifier.length > 0) {
+            [seed appendString:identifier];
+        } else if (track.url.lastPathComponent.length > 0) {
+            [seed appendString:track.url.lastPathComponent];
+        } else {
+            [seed appendString:SonoraDisplayTrackTitle(track)];
+        }
+        [seed appendString:@"|"];
+    }
+    return SonoraHomeStableHashString(seed) ?: @"0";
+}
+
