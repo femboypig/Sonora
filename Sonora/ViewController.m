@@ -459,7 +459,14 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
 - (UIViewController *)resolvedTopPresentedViewControllerFrom:(UIViewController *)viewController {
     UIViewController *active = viewController;
     while (active.presentedViewController != nil && !active.presentedViewController.isBeingDismissed) {
-        active = active.presentedViewController;
+        UIViewController *presented = active.presentedViewController;
+        NSString *presentedClassName = NSStringFromClass(presented.class);
+        if ([presented isKindOfClass:UISearchController.class] ||
+            [presentedClassName containsString:@"UISearchController"] ||
+            [presentedClassName containsString:@"UISearchContainerViewController"]) {
+            break;
+        }
+        active = presented;
     }
     return active;
 }
@@ -490,6 +497,12 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     if (viewController == nil) {
         return YES;
     }
+    NSString *className = NSStringFromClass(viewController.class);
+    if ([viewController isKindOfClass:UISearchController.class] ||
+        [className containsString:@"UISearchController"] ||
+        [className containsString:@"UISearchContainerViewController"]) {
+        return YES;
+    }
     if (viewController.presentingViewController != nil) {
         return NO;
     }
@@ -499,7 +512,6 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     if (viewController.hidesBottomBarWhenPushed) {
         return NO;
     }
-    NSString *className = NSStringFromClass(viewController.class);
     if ([className isEqualToString:@"SonoraPlayerViewController"]) {
         return NO;
     }

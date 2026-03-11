@@ -5491,6 +5491,9 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     if (artworkURL.length == 0) {
         return;
     }
+    if (self.searchCollectionView == nil || self.searchCollectionView.hidden) {
+        return;
+    }
 
     NSMutableArray<NSIndexPath *> *indexPaths = [NSMutableArray array];
     NSInteger miniTracksSectionIndex = NSNotFound;
@@ -5525,7 +5528,22 @@ static NSString * const SonoraMusicSearchHeaderReuseID = @"SonoraMusicSearchHead
     if (indexPaths.count == 0) {
         return;
     }
-    [self.searchCollectionView reloadItemsAtIndexPaths:indexPaths];
+    NSInteger sectionCount = [self.searchCollectionView numberOfSections];
+    NSMutableArray<NSIndexPath *> *validIndexPaths = [NSMutableArray arrayWithCapacity:indexPaths.count];
+    for (NSIndexPath *indexPath in indexPaths) {
+        if (indexPath.section < 0 || indexPath.section >= sectionCount) {
+            continue;
+        }
+        NSInteger itemCount = [self.searchCollectionView numberOfItemsInSection:indexPath.section];
+        if (indexPath.item < 0 || indexPath.item >= itemCount) {
+            continue;
+        }
+        [validIndexPaths addObject:indexPath];
+    }
+    if (validIndexPaths.count == 0) {
+        return;
+    }
+    [self.searchCollectionView reloadItemsAtIndexPaths:validIndexPaths];
 }
 
 - (void)openPlayerIfNeeded {
@@ -6747,10 +6765,13 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         }
         SonoraMiniStreamingTrack *track = self.miniStreamingTracks[indexPath.item];
         UIImage *artwork = [self cachedMiniStreamingArtworkForTrack:track];
-        [self installMiniStreamingTrack:track
-                                  queue:self.miniStreamingTracks
-                             startIndex:indexPath.item
-                       preferredArtwork:artwork];
+        NSArray<SonoraMiniStreamingTrack *> *queueSnapshot = [self.miniStreamingTracks copy] ?: @[];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self installMiniStreamingTrack:track
+                                      queue:queueSnapshot
+                                 startIndex:indexPath.item
+                           preferredArtwork:artwork];
+        });
         return;
     }
 
