@@ -718,6 +718,7 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
 @property (nonatomic, copy) NSArray<SonoraTrack *> *lastAddedTracks;
 @property (nonatomic, copy) NSArray<SonoraCollectionsAlbumItem *> *albumItems;
 @property (nonatomic, copy) NSArray<SonoraTrack *> *myMusicTracks;
+@property (nonatomic, assign) NSUInteger reloadGeneration;
 
 @end
 
@@ -945,32 +946,50 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
         return;
     }
 
-    SonoraPlaylistStore *playlistStore = SonoraPlaylistStore.sharedStore;
-    [playlistStore reloadPlaylists];
-    NSMutableArray<SonoraPlaylist *> *playlists = [(playlistStore.playlists ?: @[]) mutableCopy];
-    NSArray<SonoraPlaylist *> *likedSharedPlaylists = SonoraCollectionsLikedSharedPlaylists();
-    if (likedSharedPlaylists.count > 0) {
-        [playlists addObjectsFromArray:likedSharedPlaylists];
-    }
-    self.playlists = [playlists copy];
+    NSUInteger reloadGeneration = ++self.reloadGeneration;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
 
-    SonoraLibraryManager *library = SonoraLibraryManager.sharedManager;
-    if (library.tracks.count == 0 && SonoraFavoritesStore.sharedStore.favoriteTrackIDs.count > 0) {
-        [library reloadTracks];
-    }
-    self.allTracks = library.tracks ?: @[];
-    self.favoriteTracks = [SonoraFavoritesStore.sharedStore favoriteTracksWithLibrary:library] ?: @[];
-    self.lastAddedTracks = [self buildLastAddedTracksFromTracks:self.allTracks limit:14];
-    self.albumItems = [self buildAlbumItemsFromTracks:self.allTracks limit:14];
-    NSArray<SonoraTrack *> *affinityTracks = [SonoraTrackAnalyticsStore.sharedStore tracksSortedByAffinity:self.allTracks] ?: @[];
-    if (affinityTracks.count > 14) {
-        self.myMusicTracks = [affinityTracks subarrayWithRange:NSMakeRange(0, 14)];
-    } else {
-        self.myMusicTracks = affinityTracks;
-    }
+        SonoraPlaylistStore *playlistStore = SonoraPlaylistStore.sharedStore;
+        [playlistStore reloadPlaylists];
+        NSMutableArray<SonoraPlaylist *> *playlists = [(playlistStore.playlists ?: @[]) mutableCopy];
+        NSArray<SonoraPlaylist *> *likedSharedPlaylists = SonoraCollectionsLikedSharedPlaylists();
+        if (likedSharedPlaylists.count > 0) {
+            [playlists addObjectsFromArray:likedSharedPlaylists];
+        }
 
-    [self.collectionView reloadData];
-    [self updateEmptyState];
+        SonoraLibraryManager *library = SonoraLibraryManager.sharedManager;
+        if (library.tracks.count == 0 && SonoraFavoritesStore.sharedStore.favoriteTrackIDs.count > 0) {
+            [library reloadTracks];
+        }
+        NSArray<SonoraTrack *> *allTracks = library.tracks ?: @[];
+        NSArray<SonoraTrack *> *favoriteTracks = [SonoraFavoritesStore.sharedStore favoriteTracksWithLibrary:library] ?: @[];
+        NSArray<SonoraTrack *> *lastAddedTracks = [strongSelf buildLastAddedTracksFromTracks:allTracks limit:14];
+        NSArray<SonoraCollectionsAlbumItem *> *albumItems = [strongSelf buildAlbumItemsFromTracks:allTracks limit:14];
+        NSArray<SonoraTrack *> *affinityTracks = [SonoraTrackAnalyticsStore.sharedStore tracksSortedByAffinity:allTracks] ?: @[];
+        NSArray<SonoraTrack *> *myMusicTracks = affinityTracks.count > 14 ? [affinityTracks subarrayWithRange:NSMakeRange(0, 14)] : affinityTracks;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil || reloadGeneration != innerSelf.reloadGeneration) {
+                return;
+            }
+
+            innerSelf.playlists = [playlists copy];
+            innerSelf.allTracks = allTracks;
+            innerSelf.favoriteTracks = favoriteTracks;
+            innerSelf.lastAddedTracks = lastAddedTracks;
+            innerSelf.albumItems = albumItems;
+            innerSelf.myMusicTracks = myMusicTracks;
+
+            [innerSelf.collectionView reloadData];
+            [innerSelf updateEmptyState];
+        });
+    });
 }
 
 - (NSArray<SonoraTrack *> *)buildLastAddedTracksFromTracks:(NSArray<SonoraTrack *> *)tracks limit:(NSUInteger)limit {

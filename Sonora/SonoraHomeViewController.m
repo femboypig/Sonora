@@ -4404,6 +4404,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 @property (nonatomic, copy) NSString *lastForYouTopTrackID;
 @property (nonatomic, copy) NSString *forYouSelectedTrackID;
 @property (nonatomic, copy) NSString *homeRecommendationsSessionSignature;
+@property (nonatomic, assign) NSUInteger reloadGeneration;
 @property (nonatomic, assign) NSInteger forYouSelectionVisit;
 @property (nonatomic, assign) NSInteger homeVisitCount;
 
@@ -4668,26 +4669,61 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 }
 
 - (void)reloadHomeContent {
-    NSArray<SonoraTrack *> *tracks = SonoraLibraryManager.sharedManager.tracks;
-    if (tracks.count == 0) {
-        tracks = [SonoraLibraryManager.sharedManager reloadTracks];
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self reloadHomeContent];
+        });
+        return;
     }
 
-    self.allTracks = tracks ?: @[];
-    self.recommendationTracks = [self buildForYouTracksFromTracks:self.allTracks limit:120];
-    NSString *sessionSignature = [self recommendationsSessionSignatureForTracks:self.allTracks];
-    BOOL shouldRefreshRecommendations =
-    (self.needThisTracks.count == 0 ||
-     self.freshTracks.count == 0 ||
-     ![self.homeRecommendationsSessionSignature isEqualToString:sessionSignature]);
-    if (shouldRefreshRecommendations) {
-        self.needThisTracks = [self buildRecommendationsFromTracks:self.allTracks limit:12];
-        self.freshTracks = [self buildFreshChoiceTracksFromTracks:self.allTracks limit:12];
-        self.homeRecommendationsSessionSignature = sessionSignature;
-    }
+    NSUInteger reloadGeneration = ++self.reloadGeneration;
+    NSArray<SonoraTrack *> *existingNeedThisTracks = self.needThisTracks ?: @[];
+    NSArray<SonoraTrack *> *existingFreshTracks = self.freshTracks ?: @[];
+    NSString *existingSessionSignature = self.homeRecommendationsSessionSignature ?: @"";
 
-    [self.collectionView reloadData];
-    [self updateEmptyStateIfNeeded];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        NSArray<SonoraTrack *> *tracks = SonoraLibraryManager.sharedManager.tracks;
+        if (tracks.count == 0) {
+            tracks = [SonoraLibraryManager.sharedManager reloadTracks];
+        }
+
+        NSArray<SonoraTrack *> *allTracks = tracks ?: @[];
+        NSArray<SonoraTrack *> *recommendationTracks = [strongSelf buildForYouTracksFromTracks:allTracks limit:120];
+        NSString *sessionSignature = [strongSelf recommendationsSessionSignatureForTracks:allTracks];
+        BOOL shouldRefreshRecommendations =
+        (existingNeedThisTracks.count == 0 ||
+         existingFreshTracks.count == 0 ||
+         ![existingSessionSignature isEqualToString:sessionSignature]);
+
+        NSArray<SonoraTrack *> *needThisTracks = existingNeedThisTracks;
+        NSArray<SonoraTrack *> *freshTracks = existingFreshTracks;
+        if (shouldRefreshRecommendations) {
+            needThisTracks = [strongSelf buildRecommendationsFromTracks:allTracks limit:12];
+            freshTracks = [strongSelf buildFreshChoiceTracksFromTracks:allTracks limit:12];
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf == nil || reloadGeneration != innerSelf.reloadGeneration) {
+                return;
+            }
+
+            innerSelf.allTracks = allTracks;
+            innerSelf.recommendationTracks = recommendationTracks;
+            innerSelf.needThisTracks = needThisTracks;
+            innerSelf.freshTracks = freshTracks;
+            innerSelf.homeRecommendationsSessionSignature = sessionSignature;
+
+            [innerSelf.collectionView reloadData];
+            [innerSelf updateEmptyStateIfNeeded];
+        });
+    });
 }
 
 - (NSString *)recommendationsSessionSignatureForTracks:(NSArray<SonoraTrack *> *)tracks {
