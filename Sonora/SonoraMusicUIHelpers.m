@@ -6,6 +6,13 @@
 #import "SonoraMusicUIHelpers.h"
 
 #import "SonoraSettings.h"
+#import "SonoraServices.h"
+
+NSString * const SonoraLovelyPlaylistDefaultsKey = @"sonora_lovely_playlist_id_v1";
+NSString * const SonoraSharedPlaylistSyntheticPrefix = @"shared:";
+CGFloat const SonoraSearchRevealThreshold = 62.0;
+
+static CGFloat const SonoraSearchDismissThreshold = 40.0;
 
 void SonoraConfigureNavigationIconBarButtonItem(UIBarButtonItem *item, NSString *title) {
     if (![item isKindOfClass:UIBarButtonItem.class]) {
@@ -65,6 +72,10 @@ UIColor *SonoraAccentYellowColor(void) {
         return fromHex;
     }
     return SonoraLegacyAccentColorForIndex(SonoraSettingsLegacyAccentColorIndex());
+}
+
+UIColor *SonoraLovelyAccentRedColor(void) {
+    return [UIColor colorWithRed:0.90 green:0.12 blue:0.15 alpha:1.0];
 }
 
 SonoraPlayerFontStyle SonoraPlayerFontStyleFromDefaults(void) {
@@ -241,9 +252,196 @@ void SonoraPresentAlert(UIViewController *controller, NSString *title, NSString 
     [controller presentViewController:alert animated:YES completion:nil];
 }
 
+UIAlertController * _Nullable SonoraPresentBlockingProgressAlert(UIViewController * _Nullable controller,
+                                                                 NSString *title,
+                                                                 NSString *message) {
+    if (controller == nil) {
+        return nil;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [controller presentViewController:alert animated:YES completion:nil];
+    return alert;
+}
+
 NSString *SonoraNormalizedSearchText(NSString *text) {
     NSString *trimmed = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     return trimmed.lowercaseString ?: @"";
+}
+
+static BOOL SonoraTrackMatchesSearchQuery(SonoraTrack *track, NSString *query) {
+    if (query.length == 0) {
+        return YES;
+    }
+
+    NSString *title = track.title.lowercaseString ?: @"";
+    NSString *artist = track.artist.lowercaseString ?: @"";
+    NSString *fileName = track.fileName.lowercaseString ?: @"";
+    return ([title containsString:query] ||
+            [artist containsString:query] ||
+            [fileName containsString:query]);
+}
+
+NSArray<SonoraTrack *> *SonoraFilterTracksByQuery(NSArray<SonoraTrack *> *tracks, NSString *query) {
+    NSString *normalizedQuery = SonoraNormalizedSearchText(query);
+    if (normalizedQuery.length == 0) {
+        return tracks ?: @[];
+    }
+
+    NSMutableArray<SonoraTrack *> *filtered = [NSMutableArray arrayWithCapacity:tracks.count];
+    for (SonoraTrack *track in tracks) {
+        if (SonoraTrackMatchesSearchQuery(track, normalizedQuery)) {
+            [filtered addObject:track];
+        }
+    }
+    return [filtered copy];
+}
+
+BOOL SonoraTrackQueuesMatchByIdentifier(NSArray<SonoraTrack *> *first, NSArray<SonoraTrack *> *second) {
+    if (first.count != second.count) {
+        return NO;
+    }
+
+    for (NSUInteger idx = 0; idx < first.count; idx += 1) {
+        SonoraTrack *leftTrack = first[idx];
+        SonoraTrack *rightTrack = second[idx];
+        if (![leftTrack.identifier isEqualToString:rightTrack.identifier]) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+UISearchController *SonoraBuildSearchController(id<UISearchResultsUpdating> updater, NSString *placeholder) {
+    UISearchController *searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
+    searchController.obscuresBackgroundDuringPresentation = NO;
+    searchController.hidesNavigationBarDuringPresentation = NO;
+    searchController.searchResultsUpdater = updater;
+    searchController.searchBar.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    searchController.searchBar.autocorrectionType = UITextAutocorrectionTypeNo;
+    if (placeholder.length > 0) {
+        searchController.searchBar.placeholder = placeholder;
+    }
+    return searchController;
+}
+
+static CGFloat SonoraSearchPullDistance(UIScrollView *scrollView) {
+    if (scrollView == nil) {
+        return 0.0;
+    }
+    CGFloat topEdge = -scrollView.adjustedContentInset.top;
+    return MAX(0.0, topEdge - scrollView.contentOffset.y);
+}
+
+BOOL SonoraShouldAttachSearchController(BOOL currentlyAttached,
+                                        UISearchController * _Nullable searchController,
+                                        UIScrollView * _Nullable scrollView,
+                                        CGFloat revealThreshold) {
+    if (searchController == nil || scrollView == nil) {
+        return NO;
+    }
+
+    BOOL hasQuery = searchController.searchBar.text.length > 0;
+    if (currentlyAttached) {
+        if (searchController.isActive || hasQuery) {
+            return YES;
+        }
+
+        CGFloat topEdge = -scrollView.adjustedContentInset.top;
+        BOOL scrolledIntoContent = (scrollView.contentOffset.y > topEdge + SonoraSearchDismissThreshold);
+        return !scrolledIntoContent;
+    }
+
+    CGFloat pullDistance = SonoraSearchPullDistance(scrollView);
+    return (pullDistance >= revealThreshold);
+}
+
+void SonoraApplySearchControllerAttachment(UINavigationItem *navigationItem,
+                                           UINavigationBar * _Nullable navigationBar,
+                                           UISearchController * _Nullable searchController,
+                                           BOOL shouldAttach,
+                                           BOOL animated) {
+    if (navigationItem == nil) {
+        return;
+    }
+
+    UISearchController *targetController = shouldAttach ? searchController : nil;
+    if (navigationItem.searchController == targetController) {
+        return;
+    }
+
+    if (animated && navigationBar != nil) {
+        [UIView transitionWithView:navigationBar
+                          duration:0.20
+                           options:(UIViewAnimationOptionTransitionCrossDissolve |
+                                    UIViewAnimationOptionAllowUserInteraction |
+                                    UIViewAnimationOptionBeginFromCurrentState)
+                        animations:^{
+            navigationItem.searchController = targetController;
+            [navigationBar layoutIfNeeded];
+        }
+                        completion:nil];
+        return;
+    }
+
+    navigationItem.searchController = targetController;
+}
+
+void SonoraPresentQuickAddTrackToPlaylist(UIViewController *controller,
+                                          NSString *trackID,
+                                          dispatch_block_t _Nullable completionHandler) {
+    if (controller == nil || trackID.length == 0) {
+        return;
+    }
+
+    [SonoraPlaylistStore.sharedStore reloadPlaylists];
+    NSArray<SonoraPlaylist *> *playlists = SonoraPlaylistStore.sharedStore.playlists;
+    if (playlists.count == 0) {
+        SonoraPresentAlert(controller, @"No Playlists", @"Create a playlist first.");
+        return;
+    }
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add To Playlist"
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    for (SonoraPlaylist *playlist in playlists) {
+        BOOL alreadyContains = [playlist.trackIDs containsObject:trackID];
+        NSString *title = playlist.name ?: @"Playlist";
+        if (alreadyContains) {
+            title = [title stringByAppendingString:@"  ✓"];
+        }
+
+        UIAlertAction *action = [UIAlertAction actionWithTitle:title
+                                                         style:UIAlertActionStyleDefault
+                                                       handler:^(__unused UIAlertAction * _Nonnull selectedAction) {
+            BOOL added = [SonoraPlaylistStore.sharedStore addTrackIDs:@[trackID] toPlaylistID:playlist.playlistID];
+            if (!added) {
+                SonoraPresentAlert(controller, @"Already Added", @"Track already exists in that playlist.");
+                return;
+            }
+            if (completionHandler != nil) {
+                completionHandler();
+            }
+        }];
+        action.enabled = !alreadyContains;
+        [sheet addAction:action];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover != nil) {
+        popover.sourceView = controller.view;
+        popover.sourceRect = CGRectMake(CGRectGetMidX(controller.view.bounds),
+                                        CGRectGetMidY(controller.view.bounds),
+                                        1.0,
+                                        1.0);
+    }
+
+    [controller presentViewController:sheet animated:YES completion:nil];
 }
 
 UIButton *SonoraPlainIconButton(NSString *symbolName, CGFloat symbolSize, CGFloat weightValue) {

@@ -7,6 +7,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class SonoraTrack;
+
 typedef NS_ENUM(NSInteger, SonoraPlayerFontStyle) {
     SonoraPlayerFontStyleSystem = 0,
     SonoraPlayerFontStyleSerif = 1,
@@ -19,6 +21,7 @@ typedef NS_ENUM(NSInteger, SonoraPlayerArtworkStyle) {
 
 FOUNDATION_EXTERN void SonoraConfigureNavigationIconBarButtonItem(UIBarButtonItem *item, NSString *title);
 FOUNDATION_EXTERN UIColor *SonoraAccentYellowColor(void);
+FOUNDATION_EXTERN UIColor *SonoraLovelyAccentRedColor(void);
 FOUNDATION_EXTERN SonoraPlayerFontStyle SonoraPlayerFontStyleFromDefaults(void);
 FOUNDATION_EXTERN UIColor *SonoraPlayerBackgroundColor(void);
 FOUNDATION_EXTERN UIColor *SonoraPlayerPrimaryColor(void);
@@ -32,7 +35,28 @@ FOUNDATION_EXTERN CGFloat SonoraArtworkCornerRadiusForStyle(SonoraPlayerArtworkS
 FOUNDATION_EXTERN UIImage * _Nullable SonoraLovelySongsCoverImage(CGSize size);
 FOUNDATION_EXTERN UIView *SonoraWhiteSectionTitleLabel(NSString *text);
 FOUNDATION_EXTERN void SonoraPresentAlert(UIViewController *controller, NSString *title, NSString *message);
+FOUNDATION_EXTERN UIAlertController * _Nullable SonoraPresentBlockingProgressAlert(UIViewController * _Nullable controller,
+                                                                                   NSString *title,
+                                                                                   NSString *message);
 FOUNDATION_EXTERN NSString *SonoraNormalizedSearchText(NSString *text);
+FOUNDATION_EXTERN NSString * const SonoraLovelyPlaylistDefaultsKey;
+FOUNDATION_EXTERN NSString * const SonoraSharedPlaylistSyntheticPrefix;
+FOUNDATION_EXTERN CGFloat const SonoraSearchRevealThreshold;
+FOUNDATION_EXTERN NSArray<SonoraTrack *> *SonoraFilterTracksByQuery(NSArray<SonoraTrack *> *tracks, NSString *query);
+FOUNDATION_EXTERN BOOL SonoraTrackQueuesMatchByIdentifier(NSArray<SonoraTrack *> *first, NSArray<SonoraTrack *> *second);
+FOUNDATION_EXTERN UISearchController *SonoraBuildSearchController(id<UISearchResultsUpdating> updater, NSString *placeholder);
+FOUNDATION_EXTERN BOOL SonoraShouldAttachSearchController(BOOL currentlyAttached,
+                                                          UISearchController * _Nullable searchController,
+                                                          UIScrollView * _Nullable scrollView,
+                                                          CGFloat revealThreshold);
+FOUNDATION_EXTERN void SonoraApplySearchControllerAttachment(UINavigationItem *navigationItem,
+                                                             UINavigationBar * _Nullable navigationBar,
+                                                             UISearchController * _Nullable searchController,
+                                                             BOOL shouldAttach,
+                                                             BOOL animated);
+FOUNDATION_EXTERN void SonoraPresentQuickAddTrackToPlaylist(UIViewController *controller,
+                                                            NSString *trackID,
+                                                            dispatch_block_t _Nullable completionHandler);
 FOUNDATION_EXTERN UIButton *SonoraPlainIconButton(NSString *symbolName, CGFloat symbolSize, CGFloat weightValue);
 FOUNDATION_EXTERN UIImage *SonoraSliderThumbImage(CGFloat diameter, UIColor *color);
 

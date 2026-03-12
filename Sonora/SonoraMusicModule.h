@@ -10,6 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXTERN BOOL SonoraHandleMusicModuleDeepLinkURL(NSURL *url);
 
 @interface SonoraMusicViewController : UIViewController
+@property (nonatomic, assign) BOOL musicOnlyMode;
 @end
 
 @interface SonoraPlaylistsViewController : UIViewController

@@ -5,9 +5,9 @@
 
 #import "SonoraCollectionsViewController.h"
 
-#import <objc/message.h>
-
 #import "SonoraHomeAlbumDetailViewController.h"
+#import "SonoraMusicModule.h"
+#import "SonoraPlaylistViewControllers.h"
 #import "SonoraPlayerViewController.h"
 #import "SonoraSettings.h"
 #import "SonoraSharedPlaylists.h"
@@ -94,52 +94,8 @@ static UIView *SonoraCollectionsNavigationTitleView(NSString *text) {
     return titleLabel;
 }
 
-static UIViewController * _Nullable SonoraInstantiatePlaylistDetailViewController(NSString *playlistID) {
-    Class detailClass = NSClassFromString(@"SonoraPlaylistDetailViewController");
-    if (detailClass == Nil || ![detailClass isSubclassOfClass:UIViewController.class]) {
-        return nil;
-    }
-
-    SEL initializer = NSSelectorFromString(@"initWithPlaylistID:");
-    id instance = [detailClass alloc];
-    if (instance == nil || ![instance respondsToSelector:initializer]) {
-        return nil;
-    }
-
-    id (*messageSend)(id, SEL, id) = (void *)objc_msgSend;
-    id controller = messageSend(instance, initializer, playlistID);
-    if (![controller isKindOfClass:UIViewController.class]) {
-        return nil;
-    }
-    return (UIViewController *)controller;
-}
-
-static UIViewController * _Nullable SonoraInstantiateFavoritesViewController(void) {
-    Class favoritesClass = NSClassFromString(@"SonoraFavoritesViewController");
-    if (favoritesClass == Nil || ![favoritesClass isSubclassOfClass:UIViewController.class]) {
-        return nil;
-    }
-    return [[favoritesClass alloc] init];
-}
-
 static UIViewController * _Nullable SonoraInstantiatePlayerFromCollections(void) {
     return [[SonoraPlayerViewController alloc] init];
-}
-
-static UIViewController * _Nullable SonoraInstantiatePlaylistNameViewController(void) {
-    Class nameClass = NSClassFromString(@"SonoraPlaylistNameViewController");
-    if (nameClass == Nil || ![nameClass isSubclassOfClass:UIViewController.class]) {
-        return nil;
-    }
-    return [[nameClass alloc] init];
-}
-
-static UIViewController * _Nullable SonoraInstantiatePlaylistsViewController(void) {
-    Class playlistsClass = NSClassFromString(@"SonoraPlaylistsViewController");
-    if (playlistsClass == Nil || ![playlistsClass isSubclassOfClass:UIViewController.class]) {
-        return nil;
-    }
-    return [[playlistsClass alloc] init];
 }
 
 static NSString *SonoraCollectionsTrackTitle(SonoraTrack *track) {
@@ -1102,26 +1058,20 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
 }
 
 - (void)openPlaylistsPage {
-    UIViewController *playlistsController = SonoraInstantiatePlaylistsViewController();
-    if (playlistsController == nil || self.navigationController == nil) {
+    if (self.navigationController == nil) {
         return;
     }
+    SonoraPlaylistsViewController *playlistsController = [[SonoraPlaylistsViewController alloc] init];
     playlistsController.hidesBottomBarWhenPushed = YES;
     [self.navigationController pushViewController:playlistsController animated:YES];
 }
 
 - (void)openMyMusicPage {
-    Class musicClass = NSClassFromString(@"SonoraMusicViewController");
-    if (musicClass == Nil || ![musicClass isSubclassOfClass:UIViewController.class] || self.navigationController == nil) {
+    if (self.navigationController == nil) {
         return;
     }
-
-    UIViewController *musicController = [[musicClass alloc] init];
-    SEL setModeSelector = NSSelectorFromString(@"setMusicOnlyMode:");
-    if ([musicController respondsToSelector:setModeSelector]) {
-        void (*messageSend)(id, SEL, BOOL) = (void *)objc_msgSend;
-        messageSend(musicController, setModeSelector, YES);
-    }
+    SonoraMusicViewController *musicController = [[SonoraMusicViewController alloc] init];
+    musicController.musicOnlyMode = YES;
     musicController.hidesBottomBarWhenPushed = YES;
     [self.navigationController pushViewController:musicController animated:YES];
 }
@@ -1310,10 +1260,10 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
             return;
         }
         case SonoraCollectionsSectionFavoritesSummary: {
-            UIViewController *favoritesController = SonoraInstantiateFavoritesViewController();
-            if (favoritesController == nil || self.navigationController == nil) {
+            if (self.navigationController == nil) {
                 return;
             }
+            SonoraFavoritesViewController *favoritesController = [[SonoraFavoritesViewController alloc] init];
             favoritesController.hidesBottomBarWhenPushed = YES;
             [self.navigationController pushViewController:favoritesController animated:YES];
             return;
@@ -1346,10 +1296,10 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
         }
         case SonoraCollectionsSectionPlaylists: {
             if (indexPath.item == self.playlists.count) {
-                UIViewController *nameVC = SonoraInstantiatePlaylistNameViewController();
-                if (nameVC == nil || self.navigationController == nil) {
+                if (self.navigationController == nil) {
                     return;
                 }
+                SonoraPlaylistNameViewController *nameVC = [[SonoraPlaylistNameViewController alloc] init];
                 nameVC.hidesBottomBarWhenPushed = YES;
                 [self.navigationController pushViewController:nameVC animated:YES];
                 return;
@@ -1358,10 +1308,10 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
                 return;
             }
             SonoraPlaylist *playlist = self.playlists[indexPath.item];
-            UIViewController *detail = SonoraInstantiatePlaylistDetailViewController(playlist.playlistID);
-            if (detail == nil) {
+            if (self.navigationController == nil) {
                 return;
             }
+            SonoraPlaylistDetailViewController *detail = [[SonoraPlaylistDetailViewController alloc] initWithPlaylistID:playlist.playlistID];
             detail.hidesBottomBarWhenPushed = YES;
             [self.navigationController pushViewController:detail animated:YES];
             return;
