@@ -11,6 +11,7 @@
 
 #import "SonoraCells.h"
 #import "SonoraHistoryViewController.h"
+#import "SonoraPlayerViewController.h"
 #import "SonoraSettingsViewController.h"
 #import "SonoraSettings.h"
 #import "SonoraSleepTimerUI.h"
@@ -341,9 +342,6 @@ static void SonoraShuffleMutableArray(NSMutableArray *array) {
         [array exchangeObjectAtIndex:idx withObjectAtIndex:(NSUInteger)swapIdx];
     }
 }
-
-@interface SonoraPlayerViewController : UIViewController
-@end
 
 static UIViewController * _Nullable SonoraInstantiatePlayerViewController(void) {
     return [[SonoraPlayerViewController alloc] init];

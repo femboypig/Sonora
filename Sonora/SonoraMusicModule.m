@@ -6,6 +6,7 @@
 #import "SonoraMusicModule.h"
 
 #import "SonoraMiniStreamingClient.h"
+#import "SonoraPlayerViewController.h"
 #import <limits.h>
 #import <math.h>
 #import <PhotosUI/PhotosUI.h>
@@ -1312,9 +1313,6 @@ static UIImage *SonoraSliderThumbImage(CGFloat diameter, UIColor *color) {
         [path fill];
     }];
 }
-
-@interface SonoraPlayerViewController : UIViewController
-@end
 
 @interface SonoraPlaylistNameViewController : UIViewController
 @end

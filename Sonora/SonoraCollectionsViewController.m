@@ -7,6 +7,7 @@
 
 #import <objc/message.h>
 
+#import "SonoraPlayerViewController.h"
 #import "SonoraSettings.h"
 #import "SonoraSharedPlaylists.h"
 #import "SonoraServices.h"
@@ -121,11 +122,7 @@ static UIViewController * _Nullable SonoraInstantiateFavoritesViewController(voi
 }
 
 static UIViewController * _Nullable SonoraInstantiatePlayerFromCollections(void) {
-    Class playerClass = NSClassFromString(@"SonoraPlayerViewController");
-    if (playerClass == Nil || ![playerClass isSubclassOfClass:UIViewController.class]) {
-        return nil;
-    }
-    return [[playerClass alloc] init];
+    return [[SonoraPlayerViewController alloc] init];
 }
 
 static UIViewController * _Nullable SonoraInstantiatePlaylistNameViewController(void) {

@@ -6,14 +6,11 @@
 #import "SonoraHistoryViewController.h"
 
 #import "SonoraCells.h"
+#import "SonoraPlayerViewController.h"
 #import "SonoraServices.h"
 
 static UIViewController * _Nullable SonoraInstantiatePlayerFromHistory(void) {
-    Class playerClass = NSClassFromString(@"SonoraPlayerViewController");
-    if (playerClass == Nil || ![playerClass isSubclassOfClass:UIViewController.class]) {
-        return nil;
-    }
-    return [[playerClass alloc] init];
+    return [[SonoraPlayerViewController alloc] init];
 }
 
 @interface SonoraHistoryViewController () <UITableViewDataSource, UITableViewDelegate>

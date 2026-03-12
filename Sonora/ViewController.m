@@ -12,6 +12,8 @@
 #import "SonoraCollectionsViewController.h"
 #import "SonoraHomeViewController.h"
 #import "SonoraMusicModule.h"
+#import "SonoraPlayerViewController.h"
+#import "SonoraSettingsViewController.h"
 #import "SonoraServices.h"
 
 #if __has_include(<UIKit/UIGlassEffect.h>)
@@ -512,10 +514,8 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     if (viewController.hidesBottomBarWhenPushed) {
         return NO;
     }
-    if ([className isEqualToString:@"SonoraPlayerViewController"]) {
-        return NO;
-    }
-    if ([className isEqualToString:@"SonoraSettingsViewController"]) {
+    if ([viewController isKindOfClass:SonoraPlayerViewController.class] ||
+        [viewController isKindOfClass:SonoraSettingsViewController.class]) {
         return NO;
     }
     return YES;
@@ -782,16 +782,11 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     }
 
     UIViewController *top = navigation.topViewController;
-    if ([NSStringFromClass(top.class) isEqualToString:@"SonoraPlayerViewController"]) {
+    if ([top isKindOfClass:SonoraPlayerViewController.class]) {
         return;
     }
 
-    Class playerClass = NSClassFromString(@"SonoraPlayerViewController");
-    if (playerClass == Nil || ![playerClass isSubclassOfClass:UIViewController.class]) {
-        return;
-    }
-
-    UIViewController *player = [[playerClass alloc] init];
+    UIViewController *player = [[SonoraPlayerViewController alloc] init];
     player.hidesBottomBarWhenPushed = YES;
     [navigation pushViewController:player animated:YES];
 }
