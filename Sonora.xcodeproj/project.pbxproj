@@ -319,7 +319,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphone*]" = Sonora/Sonora.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 348;
+				CURRENT_PROJECT_VERSION = 349;
 				DEVELOPMENT_TEAM = G543SDPWN3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Sonora/Info.plist;
@@ -333,7 +333,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.2.1;
+				MARKETING_VERSION = 2.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = ru.hippo.Sonora;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -349,7 +349,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphone*]" = Sonora/Sonora.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 348;
+				CURRENT_PROJECT_VERSION = 349;
 				DEVELOPMENT_TEAM = G543SDPWN3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Sonora/Info.plist;
@@ -363,7 +363,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.2.1;
+				MARKETING_VERSION = 2.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = ru.hippo.Sonora;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -494,7 +494,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = SonoraLovelyWidget/SonoraLovelyWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 348;
+				CURRENT_PROJECT_VERSION = 349;
 				DEVELOPMENT_TEAM = G543SDPWN3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SonoraLovelyWidget/Info.plist;
@@ -504,7 +504,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2.2.1;
+				MARKETING_VERSION = 2.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = ru.hippo.Sonora.LovelyWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -521,7 +521,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = SonoraLovelyWidget/SonoraLovelyWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 348;
+				CURRENT_PROJECT_VERSION = 349;
 				DEVELOPMENT_TEAM = G543SDPWN3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SonoraLovelyWidget/Info.plist;
@@ -531,7 +531,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2.2.1;
+				MARKETING_VERSION = 2.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = ru.hippo.Sonora.LovelyWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
