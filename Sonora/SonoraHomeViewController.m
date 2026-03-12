@@ -471,6 +471,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
 - (void)applyPalette:(NSArray<UIColor *> *)palette animated:(BOOL)animated;
 - (void)setPlaying:(BOOL)playing;
 - (void)setPulseSeedWithTrackIdentifier:(NSString * _Nullable)identifier;
+- (void)ensureAnimationsRunning;
 
 @end
 
@@ -1009,6 +1010,37 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
     [self restartGlowAnimations];
 }
 
+- (void)ensureAnimationsRunning {
+    if (CGRectIsEmpty(self.bounds) || self.lineLayers.count == 0) {
+        return;
+    }
+
+    __block BOOL isMissingLineAnimations = NO;
+    [self.lineLayers enumerateObjectsUsingBlock:^(CAShapeLayer * _Nonnull line, NSUInteger idx, BOOL * _Nonnull stop) {
+        (void)idx;
+        if ([line animationForKey:@"sonora_wave_line_path"] == nil ||
+            [line animationForKey:@"sonora_wave_line_opacity"] == nil ||
+            (self.playing && [line animationForKey:@"sonora_wave_line_scale"] == nil)) {
+            isMissingLineAnimations = YES;
+            *stop = YES;
+        }
+    }];
+
+    BOOL isMissingGlowAnimations =
+    ([self.haloLayer animationForKey:@"sonora_wave_halo_scale"] == nil) ||
+    ([self.haloLayer animationForKey:@"sonora_wave_halo_opacity"] == nil) ||
+    ([self.coreGlowLayer animationForKey:@"sonora_wave_core_scale"] == nil) ||
+    ([self.coreGlowLayer animationForKey:@"sonora_wave_core_opacity"] == nil);
+
+    if (isMissingLineAnimations) {
+        [self restartLineAnimations];
+    }
+    if (isMissingGlowAnimations) {
+        [self restartGlowAnimations];
+    }
+    [self updatePlaybackStateAnimated:NO];
+}
+
 - (void)transitionToUpdatedGeometry {
     if (CGRectIsEmpty(self.bounds)) {
         return;
@@ -1480,7 +1512,9 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
 @interface SonoraHomeHeroRecommendationCell : UICollectionViewCell
 
 @property (nonatomic, copy, nullable) dispatch_block_t playHandler;
+@property (nonatomic, copy, readonly, nullable) NSString *configuredTrackIdentifier;
 - (void)configureWithTrack:(SonoraTrack *)track;
+- (void)resumeWaveAnimationsIfNeeded;
 
 @end
 
@@ -1492,6 +1526,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIButton *playButton;
 @property (nonatomic, assign) BOOL playing;
+@property (nonatomic, copy) NSString *configuredTrackIdentifier;
 
 @end
 
@@ -1599,6 +1634,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
     self.titleLabel.text = @"My wave";
     self.playHandler = nil;
     self.playing = NO;
+    self.configuredTrackIdentifier = nil;
     [self.contourWaveBackgroundView setPlaying:NO];
     [self.nebulaWaveBackgroundView setPlaying:NO];
     [self updatePlayButton];
@@ -1612,6 +1648,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
 }
 
 - (void)configureWithTrack:(SonoraTrack *)track {
+    self.configuredTrackIdentifier = track.identifier ?: @"";
     NSArray<UIColor *> *palette = SonoraResolvedWavePalette(track.artwork);
     [self updateThemeColors];
     [self updateWaveLookAnimated:NO];
@@ -1625,6 +1662,12 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
         [self.contourWaveBackgroundView setPulseSeedWithTrackIdentifier:track.identifier];
         [self.contourWaveBackgroundView setPlaying:self.playing];
         [self.contourWaveBackgroundView applyPalette:palette animated:YES];
+    }
+}
+
+- (void)resumeWaveAnimationsIfNeeded {
+    if (SonoraCurrentMyWaveLook() == SonoraMyWaveLookContours) {
+        [self.contourWaveBackgroundView ensureAnimationsRunning];
     }
 }
 
@@ -3579,6 +3622,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 @property (nonatomic, assign) NSUInteger reloadGeneration;
 @property (nonatomic, assign) NSInteger forYouSelectionVisit;
 @property (nonatomic, assign) NSInteger homeVisitCount;
+@property (nonatomic, assign) BOOL hasLoadedInitialHomeContent;
 
 @end
 
@@ -3627,7 +3671,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     }
 
     if (self.recommendationTracks.count > 0) {
-        [self refreshVisibleWaveCellIfNeeded];
+        [self refreshVisibleWaveCellIfNeededPreservingWaveProgress:YES];
     } else {
         [collectionView reloadData];
     }
@@ -3656,8 +3700,18 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self applyTransparentNavigationBarAppearance];
-    self.homeVisitCount += 1;
-    [self reloadHomeContent];
+    if (!self.hasLoadedInitialHomeContent) {
+        self.hasLoadedInitialHomeContent = YES;
+        self.homeVisitCount += 1;
+        [self reloadHomeContent];
+        return;
+    }
+    [self refreshVisibleWaveCellIfNeededPreservingWaveProgress:YES];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self refreshVisibleWaveCellIfNeededPreservingWaveProgress:YES];
 }
 
 - (void)applyTransparentNavigationBarAppearance {
@@ -3910,7 +3964,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
             innerSelf.homeRecommendationsSessionSignature = sessionSignature;
 
             if (contentUnchanged) {
-                [innerSelf refreshVisibleWaveCellIfNeeded];
+                [innerSelf refreshVisibleWaveCellIfNeededPreservingWaveProgress:YES];
                 [innerSelf updateEmptyStateIfNeeded];
                 return;
             }
@@ -4348,7 +4402,8 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     return ratio >= 0.68;
 }
 
-- (void)configureHeroRecommendationCell:(SonoraHomeHeroRecommendationCell *)cell {
+- (void)configureHeroRecommendationCell:(SonoraHomeHeroRecommendationCell *)cell
+                  preserveWaveProgress:(BOOL)preserveWaveProgress {
     if (cell == nil || self.recommendationTracks.count == 0) {
         return;
     }
@@ -4357,8 +4412,17 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     SonoraTrack *currentTrack = SonoraPlaybackManager.sharedManager.currentTrack;
     BOOL isWaveQueue = [self isWaveQueueActiveForQueue:queue currentTrack:currentTrack];
     SonoraTrack *displayTrack = (isWaveQueue && currentTrack != nil) ? currentTrack : self.recommendationTracks.firstObject;
-    [cell configureWithTrack:displayTrack];
+    BOOL shouldPreserveConfiguredWave =
+    preserveWaveProgress &&
+    displayTrack.identifier.length > 0 &&
+    [cell.configuredTrackIdentifier isEqualToString:displayTrack.identifier];
+    if (shouldPreserveConfiguredWave) {
+        [cell resumeWaveAnimationsIfNeeded];
+    } else {
+        [cell configureWithTrack:displayTrack];
+    }
     cell.playing = isWaveQueue && SonoraPlaybackManager.sharedManager.isPlaying;
+    [cell resumeWaveAnimationsIfNeeded];
 
     __weak typeof(self) weakSelf = self;
     cell.playHandler = ^{
@@ -4377,7 +4441,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     };
 }
 
-- (void)refreshVisibleWaveCellIfNeeded {
+- (void)refreshVisibleWaveCellIfNeededPreservingWaveProgress:(BOOL)preserveWaveProgress {
     if (self.collectionView == nil || self.recommendationTracks.count == 0) {
         return;
     }
@@ -4388,7 +4452,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         return;
     }
 
-    [self configureHeroRecommendationCell:cell];
+    [self configureHeroRecommendationCell:cell preserveWaveProgress:preserveWaveProgress];
 }
 
 - (__kindof UICollectionViewCell *)collectionView:(UICollectionView *)collectionView
@@ -4398,7 +4462,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
             SonoraHomeHeroRecommendationCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:SonoraHomeHeroRecommendationCellReuseID
                                                                                              forIndexPath:indexPath];
             if (self.recommendationTracks.count > 0) {
-                [self configureHeroRecommendationCell:cell];
+                [self configureHeroRecommendationCell:cell preserveWaveProgress:NO];
             }
             return cell;
         }
