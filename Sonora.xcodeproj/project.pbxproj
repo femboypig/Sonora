@@ -505,3 +505,142 @@
 	};
 	rootObject = 91322FAE2F4A7F8C002ADCB9 /* Project object */;
 }
+		B1B2C3D4E5F6010000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 91322FAE2F4A7F8C002ADCB9 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 91322FB52F4A7F8C002ADCB9;
+			remoteInfo = Sonora;
+		};
+		B1B2C3D4E5F6010000000001 /* SonoraTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SonoraTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1B2C3D4E5F6010000000002 /* SonoraTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SonoraTests;
+			sourceTree = "<group>";
+		};
+		B1B2C3D4E5F6010000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+				B1B2C3D4E5F6010000000002 /* SonoraTests */,
+				B1B2C3D4E5F6010000000001 /* SonoraTests.xctest */,
+		B1B2C3D4E5F6010000000006 /* SonoraTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B1B2C3D4E5F601000000000B /* Build configuration list for PBXNativeTarget "SonoraTests" */;
+			buildPhases = (
+				B1B2C3D4E5F6010000000004 /* Sources */,
+				B1B2C3D4E5F6010000000003 /* Frameworks */,
+				B1B2C3D4E5F6010000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B1B2C3D4E5F6010000000008 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B1B2C3D4E5F6010000000002 /* SonoraTests */,
+			);
+			name = SonoraTests;
+			packageProductDependencies = (
+			);
+			productName = SonoraTests;
+			productReference = B1B2C3D4E5F6010000000001 /* SonoraTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+					B1B2C3D4E5F6010000000006 = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 91322FB52F4A7F8C002ADCB9;
+					};
+				B1B2C3D4E5F6010000000006 /* SonoraTests */,
+		B1B2C3D4E5F6010000000005 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B1B2C3D4E5F6010000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B1B2C3D4E5F6010000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			platformFilter = ios;
+			target = 91322FB52F4A7F8C002ADCB9 /* Sonora */;
+			targetProxy = B1B2C3D4E5F6010000000007 /* PBXContainerItemProxy */;
+		};
+		B1B2C3D4E5F6010000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = G543SDPWN3;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Sonora",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ru.hippo.SonoraTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sonora.app/Sonora";
+				TEST_TARGET_NAME = Sonora;
+			};
+			name = Debug;
+		};
+		B1B2C3D4E5F601000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = G543SDPWN3;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Sonora",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ru.hippo.SonoraTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sonora.app/Sonora";
+				TEST_TARGET_NAME = Sonora;
+			};
+			name = Release;
+		};
+		B1B2C3D4E5F601000000000B /* Build configuration list for PBXNativeTarget "SonoraTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1B2C3D4E5F6010000000009 /* Debug */,
+				B1B2C3D4E5F601000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
