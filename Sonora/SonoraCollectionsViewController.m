@@ -7,6 +7,7 @@
 
 #import <objc/message.h>
 
+#import "SonoraHomeAlbumDetailViewController.h"
 #import "SonoraPlayerViewController.h"
 #import "SonoraSettings.h"
 #import "SonoraSharedPlaylists.h"
@@ -1399,20 +1400,8 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
             if (player != nil && self.navigationController != nil) {
                 player.hidesBottomBarWhenPushed = YES;
             }
-            Class albumClass = NSClassFromString(@"SonoraHomeAlbumDetailViewController");
-            if (albumClass == Nil || ![albumClass isSubclassOfClass:UIViewController.class]) {
-                return;
-            }
-            SEL initializer = NSSelectorFromString(@"initWithAlbumTitle:tracks:");
-            id instance = [albumClass alloc];
-            if (instance == nil || ![instance respondsToSelector:initializer]) {
-                return;
-            }
-            id (*messageSend)(id, SEL, id, id) = (void *)objc_msgSend;
-            UIViewController *detail = messageSend(instance, initializer, item.title, tracks);
-            if (![detail isKindOfClass:UIViewController.class]) {
-                return;
-            }
+            UIViewController *detail = [[SonoraHomeAlbumDetailViewController alloc] initWithAlbumTitle:item.title
+                                                                                                 tracks:tracks];
             detail.hidesBottomBarWhenPushed = YES;
             [self.navigationController pushViewController:detail animated:YES];
             return;
