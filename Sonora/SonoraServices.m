@@ -1402,13 +1402,14 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         }
 
         NSError *replaceError = nil;
-        NSURL *resultURL = [NSFileManager.defaultManager replaceItemAtURL:fileURL
-                                                            withItemAtURL:temporaryURL
-                                                           backupItemName:nil
-                                                                  options:0
-                                                         resultingItemURL:nil
-                                                                    error:&replaceError];
-        if (resultURL == nil || replaceError != nil) {
+        NSURL *resultURL = nil;
+        BOOL replaced = [NSFileManager.defaultManager replaceItemAtURL:fileURL
+                                                         withItemAtURL:temporaryURL
+                                                        backupItemName:nil
+                                                               options:0
+                                                      resultingItemURL:&resultURL
+                                                                 error:&replaceError];
+        if (!replaced || replaceError != nil) {
             [NSFileManager.defaultManager removeItemAtURL:temporaryURL error:nil];
             finish(NO);
             return;
