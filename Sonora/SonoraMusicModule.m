@@ -9310,7 +9310,15 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     CGFloat horizontalInset = (artworkStyle == SonoraPlayerArtworkStyleRounded) ? 12.0 : 0.0;
     self.artworkLeadingConstraint.constant = horizontalInset;
     self.artworkTrailingConstraint.constant = -horizontalInset;
-    self.artworkView.layer.cornerRadius = SonoraArtworkCornerRadiusForStyle(artworkStyle, CGRectGetWidth(self.artworkView.bounds));
+    CGFloat artworkWidth = CGRectGetWidth(self.artworkView.bounds);
+    if (artworkWidth < 1.0) {
+        CGFloat fallbackWidth = CGRectGetWidth(self.view.bounds);
+        if (fallbackWidth < 1.0) {
+            fallbackWidth = CGRectGetWidth(UIScreen.mainScreen.bounds);
+        }
+        artworkWidth = MAX(0.0, fallbackWidth - (horizontalInset * 2.0));
+    }
+    self.artworkView.layer.cornerRadius = SonoraArtworkCornerRadiusForStyle(artworkStyle, artworkWidth);
     self.artworkView.layer.masksToBounds = YES;
     if (@available(iOS 13.0, *)) {
         self.artworkView.layer.cornerCurve = kCACornerCurveContinuous;
