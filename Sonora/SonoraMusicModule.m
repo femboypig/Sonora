@@ -88,10 +88,9 @@ BOOL SonoraHandleMusicModuleDeepLinkURL(NSURL *url) {
     dispatch_async(dispatch_get_main_queue(), ^{
         progress = SonoraPresentBlockingProgressAlert(presenter, @"Opening Playlist", @"Loading tracks from server...");
     });
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *requestString = [[sourceBaseURL stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] stringByAppendingFormat:@"/api/shared-playlists/%@", playlistID];
-        NSURL *requestURL = [NSURL URLWithString:requestString];
-        NSData *data = requestURL != nil ? SonoraSharedPlaylistDataFromURL(requestURL, 120.0, nil) : nil;
+    NSString *requestString = [[sourceBaseURL stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] stringByAppendingFormat:@"/api/shared-playlists/%@", playlistID];
+    NSURL *requestURL = [NSURL URLWithString:requestString];
+    SonoraSharedPlaylistDataFromURL(requestURL, 120.0, ^(NSData * _Nullable data, __unused NSURLResponse * _Nullable response, __unused NSError * _Nullable error) {
         NSDictionary *payload = data.length > 0 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         SonoraSharedPlaylistSnapshot *snapshot = SonoraSharedPlaylistSnapshotFromPayload(payload, sourceBaseURL);
         if (snapshot == nil && cachedSnapshot != nil) {
@@ -104,9 +103,7 @@ BOOL SonoraHandleMusicModuleDeepLinkURL(NSURL *url) {
             SonoraSharedPlaylistPerformWithoutDidChangeNotification(^{
                 [sharedPlaylistStore saveSnapshot:snapshot];
             });
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                SonoraSharedPlaylistWarmPersistentCache(snapshot);
-            });
+            SonoraSharedPlaylistWarmPersistentCache(snapshot, nil);
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             void (^finishOpening)(void) = ^{
@@ -7643,6 +7640,198 @@ replacementString:(NSString *)string {
     return [[NSOrderedSet orderedSetWithArray:matched] array];
 }
 
+- (void)downloadSharedPlaylistTracks:(NSArray<SonoraTrack *> *)tracks
+                               index:(NSUInteger)index
+                            progress:(UIAlertController *)progress
+                    importedTrackIDs:(NSMutableArray<NSString *> *)importedTrackIDs
+                          completion:(dispatch_block_t)completion {
+    if (index >= tracks.count) {
+        if (completion != nil) {
+            completion();
+        }
+        return;
+    }
+
+    SonoraTrack *track = tracks[index];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        progress.message = [NSString stringWithFormat:@"Downloading track %lu/%lu...",
+                            (unsigned long)(index + 1),
+                            (unsigned long)tracks.count];
+    });
+    NSString *suggestedName = track.artist.length > 0
+    ? [NSString stringWithFormat:@"%@ - %@", track.artist, track.title ?: @"Track"]
+    : (track.title ?: @"Track");
+    __weak typeof(self) weakSelf = self;
+    SonoraSharedPlaylistDownloadedFileURL(track.url.absoluteString ?: @"", suggestedName, ^(NSURL * _Nullable fileURL, __unused NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (fileURL != nil) {
+            [importedTrackIDs addObject:fileURL.path ?: @""];
+        }
+        [strongSelf downloadSharedPlaylistTracks:tracks
+                                           index:(index + 1)
+                                        progress:progress
+                                importedTrackIDs:importedTrackIDs
+                                      completion:completion];
+    });
+}
+
+- (NSString *)sharedPlaylistEncodedFilename:(NSString *)value {
+    NSString *safeValue = value.length > 0 ? value : @"file.bin";
+    return [safeValue stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet] ?: safeValue;
+}
+
+- (NSString *)sharedPlaylistAudioMimeTypeForExtension:(NSString *)extension {
+    NSString *normalized = extension.lowercaseString ?: @"";
+    if ([normalized isEqualToString:@"m4a"]) {
+        return @"audio/mp4";
+    }
+    if ([normalized isEqualToString:@"aac"]) {
+        return @"audio/aac";
+    }
+    if ([normalized isEqualToString:@"wav"]) {
+        return @"audio/wav";
+    }
+    if ([normalized isEqualToString:@"ogg"]) {
+        return @"audio/ogg";
+    }
+    if ([normalized isEqualToString:@"flac"]) {
+        return @"audio/flac";
+    }
+    return @"audio/mpeg";
+}
+
+- (void)uploadSharedPlaylistBinaryAtEndpointPath:(NSString *)endpointPath
+                                   baseURLString:(NSString *)baseURLString
+                                        filename:(NSString *)filename
+                                        mimeType:(NSString *)mimeType
+                                            data:(NSData * _Nullable)data
+                                         fileURL:(NSURL * _Nullable)fileURL
+                                      completion:(void (^)(BOOL success))completion {
+    if ((data.length == 0) && !fileURL.isFileURL) {
+        if (completion != nil) {
+            completion(YES);
+        }
+        return;
+    }
+
+    NSString *urlString = [NSString stringWithFormat:@"%@%@?filename=%@",
+                           baseURLString,
+                           endpointPath,
+                           [self sharedPlaylistEncodedFilename:filename]];
+    NSURL *uploadURL = [NSURL URLWithString:urlString];
+    if (uploadURL == nil) {
+        if (completion != nil) {
+            completion(NO);
+        }
+        return;
+    }
+
+    NSMutableURLRequest *uploadRequest = [NSMutableURLRequest requestWithURL:uploadURL];
+    uploadRequest.HTTPMethod = @"POST";
+    uploadRequest.timeoutInterval = 600.0;
+    [uploadRequest setValue:(mimeType.length > 0 ? mimeType : @"application/octet-stream") forHTTPHeaderField:@"Content-Type"];
+    if (fileURL.isFileURL) {
+        SonoraSharedPlaylistUploadFileRequest(uploadRequest, fileURL, 600.0, ^(__unused NSData * _Nullable responseData, __unused NSHTTPURLResponse * _Nullable response, NSError * _Nullable error) {
+            if (completion != nil) {
+                completion(error == nil);
+            }
+        });
+        return;
+    }
+
+    uploadRequest.HTTPBody = data;
+    SonoraSharedPlaylistPerformRequest(uploadRequest, 600.0, ^(__unused NSData * _Nullable responseData, __unused NSHTTPURLResponse * _Nullable response, NSError * _Nullable error) {
+        if (completion != nil) {
+            completion(error == nil);
+        }
+    });
+}
+
+- (void)uploadSharedPlaylistTracks:(NSArray<SonoraTrack *> *)tracks
+                             index:(NSUInteger)index
+                          remoteID:(NSString *)remoteID
+                     baseURLString:(NSString *)baseURLString
+                          progress:(UIAlertController *)progress
+                        completion:(void (^)(BOOL success))completion {
+    if (index >= tracks.count) {
+        if (completion != nil) {
+            completion(YES);
+        }
+        return;
+    }
+
+    SonoraTrack *track = tracks[index];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        progress.message = [NSString stringWithFormat:@"Uploading track %lu/%lu...",
+                            (unsigned long)(index + 1),
+                            (unsigned long)tracks.count];
+    });
+
+    NSData *artworkData = track.artwork != nil ? UIImageJPEGRepresentation(track.artwork, 0.86) : nil;
+    NSString *artworkName = [NSString stringWithFormat:@"%@.jpg",
+                             track.identifier.length > 0
+                             ? track.identifier
+                             : [NSString stringWithFormat:@"track_%lu", (unsigned long)index]];
+    NSString *artworkEndpoint = [NSString stringWithFormat:@"/api/shared-playlists/%@/tracks/%lu/artwork",
+                                 remoteID,
+                                 (unsigned long)index];
+
+    __weak typeof(self) weakSelf = self;
+    [self uploadSharedPlaylistBinaryAtEndpointPath:artworkEndpoint
+                                     baseURLString:baseURLString
+                                          filename:artworkName
+                                          mimeType:@"image/jpeg"
+                                              data:artworkData
+                                           fileURL:nil
+                                        completion:^(BOOL artworkSuccess) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!artworkSuccess || strongSelf == nil) {
+            if (completion != nil) {
+                completion(NO);
+            }
+            return;
+        }
+
+        if (!track.url.isFileURL) {
+            [strongSelf uploadSharedPlaylistTracks:tracks
+                                             index:(index + 1)
+                                          remoteID:remoteID
+                                     baseURLString:baseURLString
+                                          progress:progress
+                                        completion:completion];
+            return;
+        }
+
+        NSString *extension = track.url.pathExtension.length > 0 ? track.url.pathExtension.lowercaseString : @"mp3";
+        NSString *fileName = track.url.lastPathComponent.length > 0
+        ? track.url.lastPathComponent
+        : [NSString stringWithFormat:@"track_%lu.%@", (unsigned long)index, extension];
+        NSString *audioEndpoint = [NSString stringWithFormat:@"/api/shared-playlists/%@/tracks/%lu/file",
+                                   remoteID,
+                                   (unsigned long)index];
+        [strongSelf uploadSharedPlaylistBinaryAtEndpointPath:audioEndpoint
+                                               baseURLString:baseURLString
+                                                    filename:fileName
+                                                    mimeType:[strongSelf sharedPlaylistAudioMimeTypeForExtension:extension]
+                                                        data:nil
+                                                     fileURL:track.url
+                                                  completion:^(BOOL audioSuccess) {
+            if (!audioSuccess) {
+                if (completion != nil) {
+                    completion(NO);
+                }
+                return;
+            }
+            [strongSelf uploadSharedPlaylistTracks:tracks
+                                             index:(index + 1)
+                                          remoteID:remoteID
+                                     baseURLString:baseURLString
+                                          progress:progress
+                                        completion:completion];
+        }];
+    }];
+}
+
 - (void)addSharedPlaylistLocallyTapped {
     SonoraSharedPlaylistSnapshot *snapshot = [self resolvedSharedSnapshot];
     if (snapshot == nil) {
@@ -7650,15 +7839,12 @@ replacementString:(NSString *)string {
     }
     UIAlertController *progress = SonoraPresentBlockingProgressAlert(self, @"Adding Playlist", @"Downloading tracks...");
     __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSMutableArray<NSString *> *importedTrackIDs = [NSMutableArray array];
-        for (SonoraTrack *track in snapshot.tracks) {
-            NSString *suggestedName = track.artist.length > 0 ? [NSString stringWithFormat:@"%@ - %@", track.artist, track.title ?: @"Track"] : (track.title ?: @"Track");
-            NSURL *savedURL = SonoraSharedPlaylistDownloadedFileURL(track.url.absoluteString ?: @"", suggestedName);
-            if (savedURL != nil) {
-                [importedTrackIDs addObject:savedURL.path ?: @""];
-            }
-        }
+    NSMutableArray<NSString *> *importedTrackIDs = [NSMutableArray array];
+    [self downloadSharedPlaylistTracks:snapshot.tracks
+                                 index:0
+                              progress:progress
+                      importedTrackIDs:importedTrackIDs
+                            completion:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             [progress dismissViewControllerAnimated:YES completion:nil];
@@ -7689,7 +7875,7 @@ replacementString:(NSString *)string {
             [stack addObject:detail];
             [strongSelf.navigationController setViewControllers:[stack copy] animated:YES];
         });
-    });
+    }];
 }
 
 - (void)toggleSharedPlaylistLikeTapped {
@@ -7702,9 +7888,7 @@ replacementString:(NSString *)string {
         [SonoraSharedPlaylistStore.sharedStore removeSnapshotForPlaylistID:snapshot.playlistID];
     } else {
         [SonoraSharedPlaylistStore.sharedStore saveSnapshot:snapshot];
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            SonoraSharedPlaylistWarmPersistentCache(snapshot);
-        });
+        SonoraSharedPlaylistWarmPersistentCache(snapshot, nil);
     }
 }
 
@@ -7762,107 +7946,60 @@ replacementString:(NSString *)string {
         [createRequest setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [createRequest setValue:@"application/json" forHTTPHeaderField:@"Accept"];
         createRequest.HTTPBody = manifestData;
-        NSHTTPURLResponse *createResponse = nil;
-        NSData *createData = SonoraSharedPlaylistPerformRequest(createRequest, 120.0, &createResponse);
-        NSDictionary *createPayload = createData.length > 0 ? [NSJSONSerialization JSONObjectWithData:createData options:0 error:nil] : nil;
-        NSString *remoteID = [createPayload[@"id"] isKindOfClass:NSString.class] ? createPayload[@"id"] : @"";
-        NSString *shareURL = [createPayload[@"shareUrl"] isKindOfClass:NSString.class] ? createPayload[@"shareUrl"] : createPayload[@"url"];
-        if (remoteID.length == 0 || shareURL.length == 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [progress dismissViewControllerAnimated:YES completion:nil];
-                SonoraPresentAlert(self, @"Error", @"Could not share playlist.");
-            });
-            return;
-        }
-
-        NSString *(^encodedFilename)(NSString *) = ^NSString *(NSString *value) {
-            NSString *safeValue = value.length > 0 ? value : @"file.bin";
-            return [safeValue stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet] ?: safeValue;
-        };
-
-        BOOL (^uploadBinaryFile)(NSString *, NSString *, NSString *, NSData *) = ^BOOL(NSString *endpointPath, NSString *filename, NSString *mimeType, NSData *data) {
-            if (data.length == 0) {
-                return YES;
-            }
-            NSString *urlString = [NSString stringWithFormat:@"%@%@?filename=%@", baseURLString, endpointPath, encodedFilename(filename)];
-            NSURL *uploadURL = [NSURL URLWithString:urlString];
-            if (uploadURL == nil) {
-                return NO;
-            }
-            NSMutableURLRequest *uploadRequest = [NSMutableURLRequest requestWithURL:uploadURL];
-            uploadRequest.HTTPMethod = @"POST";
-            uploadRequest.timeoutInterval = 600.0;
-            [uploadRequest setValue:(mimeType.length > 0 ? mimeType : @"application/octet-stream") forHTTPHeaderField:@"Content-Type"];
-            uploadRequest.HTTPBody = data;
-            return SonoraSharedPlaylistPerformRequest(uploadRequest, 600.0, nil) != nil;
-        };
-
         NSData *coverData = cover != nil ? UIImageJPEGRepresentation(cover, 0.88) : nil;
-        if (coverData.length > 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                progress.message = @"Uploading cover...";
-            });
-            if (!uploadBinaryFile([NSString stringWithFormat:@"/api/shared-playlists/%@/cover", remoteID], @"cover.jpg", @"image/jpeg", coverData)) {
+        __weak typeof(self) weakSelf = self;
+        SonoraSharedPlaylistPerformRequest(createRequest, 120.0, ^(NSData * _Nullable createData, __unused NSHTTPURLResponse * _Nullable createResponse, NSError * _Nullable error) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            NSDictionary *createPayload = createData.length > 0 ? [NSJSONSerialization JSONObjectWithData:createData options:0 error:nil] : nil;
+            NSString *remoteID = [createPayload[@"id"] isKindOfClass:NSString.class] ? createPayload[@"id"] : @"";
+            NSString *shareURL = [createPayload[@"shareUrl"] isKindOfClass:NSString.class] ? createPayload[@"shareUrl"] : createPayload[@"url"];
+            if (strongSelf == nil || error != nil || remoteID.length == 0 || shareURL.length == 0) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [progress dismissViewControllerAnimated:YES completion:nil];
-                    SonoraPresentAlert(self, @"Error", @"Could not upload playlist cover.");
+                    SonoraPresentAlert(weakSelf, @"Error", @"Could not share playlist.");
                 });
                 return;
             }
-        }
 
-        __block BOOL uploadFailed = NO;
-        [tracksSnapshot enumerateObjectsUsingBlock:^(SonoraTrack * _Nonnull track, NSUInteger idx, BOOL * _Nonnull stop) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                progress.message = [NSString stringWithFormat:@"Uploading track %lu/%lu...", (unsigned long)(idx + 1), (unsigned long)tracksSnapshot.count];
+                progress.message = @"Uploading cover...";
             });
-            NSData *artworkData = track.artwork != nil ? UIImageJPEGRepresentation(track.artwork, 0.86) : nil;
-            if (artworkData.length > 0) {
-                NSString *artworkName = [NSString stringWithFormat:@"%@.jpg", track.identifier.length > 0 ? track.identifier : [NSString stringWithFormat:@"track_%lu", (unsigned long)idx]];
-                if (!uploadBinaryFile([NSString stringWithFormat:@"/api/shared-playlists/%@/tracks/%lu/artwork", remoteID, (unsigned long)idx], artworkName, @"image/jpeg", artworkData)) {
-                    uploadFailed = YES;
-                    *stop = YES;
+            [strongSelf uploadSharedPlaylistBinaryAtEndpointPath:[NSString stringWithFormat:@"/api/shared-playlists/%@/cover", remoteID]
+                                                   baseURLString:baseURLString
+                                                        filename:@"cover.jpg"
+                                                        mimeType:@"image/jpeg"
+                                                            data:coverData
+                                                         fileURL:nil
+                                                      completion:^(BOOL coverSuccess) {
+                if (!coverSuccess) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [progress dismissViewControllerAnimated:YES completion:nil];
+                        SonoraPresentAlert(strongSelf, @"Error", @"Could not upload playlist cover.");
+                    });
                     return;
                 }
-            }
-            if (track.url.isFileURL) {
-                NSData *audioData = [NSData dataWithContentsOfURL:track.url options:NSDataReadingMappedIfSafe error:nil];
-                if (audioData.length > 0) {
-                    NSString *extension = track.url.pathExtension.length > 0 ? track.url.pathExtension.lowercaseString : @"mp3";
-                    NSString *mimeType = @"audio/mpeg";
-                    if ([extension isEqualToString:@"m4a"]) {
-                        mimeType = @"audio/mp4";
-                    } else if ([extension isEqualToString:@"aac"]) {
-                        mimeType = @"audio/aac";
-                    } else if ([extension isEqualToString:@"wav"]) {
-                        mimeType = @"audio/wav";
-                    } else if ([extension isEqualToString:@"ogg"]) {
-                        mimeType = @"audio/ogg";
-                    } else if ([extension isEqualToString:@"flac"]) {
-                        mimeType = @"audio/flac";
-                    }
-                    NSString *fileName = track.url.lastPathComponent.length > 0 ? track.url.lastPathComponent : [NSString stringWithFormat:@"track_%lu.%@", (unsigned long)idx, extension];
-                    if (!uploadBinaryFile([NSString stringWithFormat:@"/api/shared-playlists/%@/tracks/%lu/file", remoteID, (unsigned long)idx], fileName, mimeType, audioData)) {
-                        uploadFailed = YES;
-                        *stop = YES;
-                        return;
-                    }
-                }
-            }
-        }];
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [progress dismissViewControllerAnimated:YES completion:nil];
-            if (uploadFailed) {
-                SonoraPresentAlert(self, @"Error", @"Could not share playlist.");
-                return;
-            }
-            UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[shareURL] applicationActivities:nil];
-            UIPopoverPresentationController *popover = share.popoverPresentationController;
-            if (popover != nil) {
-                popover.barButtonItem = self.navigationItem.rightBarButtonItem;
-            }
-            [self presentViewController:share animated:YES completion:nil];
+                [strongSelf uploadSharedPlaylistTracks:tracksSnapshot
+                                                 index:0
+                                              remoteID:remoteID
+                                         baseURLString:baseURLString
+                                              progress:progress
+                                            completion:^(BOOL success) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [progress dismissViewControllerAnimated:YES completion:nil];
+                        if (!success) {
+                            SonoraPresentAlert(strongSelf, @"Error", @"Could not share playlist.");
+                            return;
+                        }
+                        UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[shareURL] applicationActivities:nil];
+                        UIPopoverPresentationController *popover = share.popoverPresentationController;
+                        if (popover != nil) {
+                            popover.barButtonItem = strongSelf.navigationItem.rightBarButtonItem;
+                        }
+                        [strongSelf presentViewController:share animated:YES completion:nil];
+                    });
+                }];
+            }];
         });
     });
 }
@@ -9351,7 +9488,7 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
             }
             SonoraSharedPlaylistSnapshot *snapshot = [SonoraSharedPlaylistStore.sharedStore snapshotForPlaylistID:playlistID];
             if (snapshot != nil) {
-                SonoraSharedPlaylistWarmPersistentCache(snapshot);
+                SonoraSharedPlaylistWarmPersistentCache(snapshot, nil);
             }
         }
     });

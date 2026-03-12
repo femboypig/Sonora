@@ -11,14 +11,29 @@ FOUNDATION_EXTERN NSString *SonoraSharedPlaylistStorageDirectoryPath(void);
 FOUNDATION_EXTERN NSString *SonoraSharedPlaylistAudioCacheDirectoryPath(void);
 FOUNDATION_EXTERN NSString *SonoraSharedPlaylistNormalizeText(NSString *value);
 
-FOUNDATION_EXTERN NSData * _Nullable SonoraSharedPlaylistDataFromURL(NSURL *url,
-                                                                    NSTimeInterval timeout,
-                                                                    NSURLResponse * __autoreleasing _Nullable * _Nullable responseOut);
-FOUNDATION_EXTERN NSData * _Nullable SonoraSharedPlaylistPerformRequest(NSURLRequest *request,
-                                                                       NSTimeInterval timeout,
-                                                                       NSHTTPURLResponse * __autoreleasing _Nullable * _Nullable responseOut);
-FOUNDATION_EXTERN NSURL * _Nullable SonoraSharedPlaylistDownloadedFileURL(NSString *urlString,
-                                                                          NSString *suggestedBaseName);
+typedef void (^SonoraSharedPlaylistDataCompletion)(NSData * _Nullable data,
+                                                   NSURLResponse * _Nullable response,
+                                                   NSError * _Nullable error);
+typedef void (^SonoraSharedPlaylistRequestCompletion)(NSData * _Nullable data,
+                                                      NSHTTPURLResponse * _Nullable response,
+                                                      NSError * _Nullable error);
+typedef void (^SonoraSharedPlaylistDownloadedFileCompletion)(NSURL * _Nullable fileURL,
+                                                             NSError * _Nullable error);
+typedef void (^SonoraSharedPlaylistWarmCompletion)(BOOL didPersistUpdates);
+
+FOUNDATION_EXTERN void SonoraSharedPlaylistDataFromURL(NSURL *url,
+                                                       NSTimeInterval timeout,
+                                                       SonoraSharedPlaylistDataCompletion completion);
+FOUNDATION_EXTERN void SonoraSharedPlaylistPerformRequest(NSURLRequest *request,
+                                                          NSTimeInterval timeout,
+                                                          SonoraSharedPlaylistRequestCompletion completion);
+FOUNDATION_EXTERN void SonoraSharedPlaylistUploadFileRequest(NSURLRequest *request,
+                                                             NSURL *fileURL,
+                                                             NSTimeInterval timeout,
+                                                             SonoraSharedPlaylistRequestCompletion completion);
+FOUNDATION_EXTERN void SonoraSharedPlaylistDownloadedFileURL(NSString *urlString,
+                                                             NSString *suggestedBaseName,
+                                                             SonoraSharedPlaylistDownloadedFileCompletion completion);
 
 @interface SonoraSharedPlaylistSnapshot : NSObject
 
@@ -39,7 +54,8 @@ FOUNDATION_EXTERN NSURL * _Nullable SonoraSharedPlaylistDownloadedFileURL(NSStri
 FOUNDATION_EXTERN SonoraSharedPlaylistSnapshot * _Nullable SonoraSharedPlaylistSnapshotFromPayload(NSDictionary<NSString *, id> *payload,
                                                                                                    NSString *fallbackBaseURL);
 FOUNDATION_EXTERN void SonoraSharedPlaylistPerformWithoutDidChangeNotification(dispatch_block_t block);
-FOUNDATION_EXTERN void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snapshot);
+FOUNDATION_EXTERN void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snapshot,
+                                                               SonoraSharedPlaylistWarmCompletion _Nullable completion);
 
 @interface SonoraSharedPlaylistStore : NSObject
 

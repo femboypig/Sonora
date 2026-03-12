@@ -5,6 +5,10 @@ static NSString * const SonoraMiniStreamingDefaultBackendBaseURLString = @"https
 static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylists.v1";
 static NSString * const SonoraSharedPlaylistSyntheticPrefix = @"shared:";
 static NSString * const SonoraSharedPlaylistSuppressDidChangeNotificationThreadKey = @"sonora.sharedPlaylists.suppressDidChangeNotification";
+static NSString * const SonoraSharedPlaylistManifestFileName = @"shared_playlists_manifest_v2.json";
+static NSString * const SonoraSharedPlaylistErrorDomain = @"SonoraSharedPlaylistErrorDomain";
+
+static NSString *SonoraSharedPlaylistSafeFileComponent(NSString *value);
 
 static UIImage * _Nullable SonoraSharedPlaylistImageFromData(NSData *data) {
     if (data.length == 0) {
@@ -54,16 +58,11 @@ static UIImage * _Nullable SonoraSharedPlaylistReadImageNamedInDirectory(NSStrin
     return SonoraSharedPlaylistImageFromData(data);
 }
 
-static UIImage * _Nullable SonoraSharedPlaylistFetchImage(NSString *urlString) {
-    if (urlString.length == 0) {
-        return nil;
-    }
-    NSURL *url = [NSURL URLWithString:urlString];
-    if (url == nil) {
-        return nil;
-    }
-    NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
-    return SonoraSharedPlaylistImageFromData(data);
+static NSError *SonoraSharedPlaylistError(NSInteger code, NSString *description) {
+    NSDictionary<NSString *, id> *userInfo = description.length > 0
+    ? @{ NSLocalizedDescriptionKey : description }
+    : @{};
+    return [NSError errorWithDomain:SonoraSharedPlaylistErrorDomain code:code userInfo:userInfo];
 }
 
 static NSURLSession *SonoraSharedPlaylistURLSession(void) {
@@ -79,9 +78,116 @@ static NSURLSession *SonoraSharedPlaylistURLSession(void) {
     return session;
 }
 
-static dispatch_time_t SonoraSharedPlaylistDispatchTimeout(NSTimeInterval timeout) {
-    NSTimeInterval seconds = MAX(MAX(timeout, 30.0) * 2.0, 60.0);
-    return dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * (NSTimeInterval)NSEC_PER_SEC));
+static NSMutableURLRequest *SonoraSharedPlaylistMutableRequest(NSURL *url, NSTimeInterval timeout) {
+    if (url == nil) {
+        return nil;
+    }
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.timeoutInterval = MAX(timeout, 30.0);
+    return request;
+}
+
+static NSString *SonoraSharedPlaylistFileExtensionForResponse(NSURLResponse *response, NSURL *remoteURL) {
+    NSString *extension = response.suggestedFilename.pathExtension.lowercaseString;
+    if (extension.length == 0) {
+        extension = remoteURL.pathExtension.length > 0 ? remoteURL.pathExtension.lowercaseString : @"";
+    }
+    if (extension.length > 0) {
+        return extension;
+    }
+
+    NSString *mimeType = response.MIMEType.lowercaseString ?: @"";
+    if ([mimeType containsString:@"mp4"]) {
+        return @"m4a";
+    }
+    if ([mimeType containsString:@"aac"]) {
+        return @"aac";
+    }
+    if ([mimeType containsString:@"wav"]) {
+        return @"wav";
+    }
+    if ([mimeType containsString:@"ogg"]) {
+        return @"ogg";
+    }
+    if ([mimeType containsString:@"flac"]) {
+        return @"flac";
+    }
+    if ([mimeType containsString:@"jpeg"] || [mimeType containsString:@"jpg"]) {
+        return @"jpg";
+    }
+    if ([mimeType containsString:@"png"]) {
+        return @"png";
+    }
+    return @"mp3";
+}
+
+static NSURL *SonoraSharedPlaylistUniqueDestinationURL(NSURL *directoryURL,
+                                                       NSString *suggestedBaseName,
+                                                       NSString *extension) {
+    NSString *baseName = SonoraSharedPlaylistSafeFileComponent(suggestedBaseName);
+    NSURL *destinationURL = [directoryURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", baseName, extension]];
+    NSUInteger suffix = 1;
+    while ([NSFileManager.defaultManager fileExistsAtPath:destinationURL.path]) {
+        destinationURL = [directoryURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@ %lu.%@",
+                                                                    baseName,
+                                                                    (unsigned long)suffix,
+                                                                    extension]];
+        suffix += 1;
+    }
+    return destinationURL;
+}
+
+static void SonoraSharedPlaylistDownloadFileToDirectory(NSURL *remoteURL,
+                                                        NSTimeInterval timeout,
+                                                        NSString *suggestedBaseName,
+                                                        NSURL *directoryURL,
+                                                        unsigned long long maximumBytes,
+                                                        void (^completion)(NSURL * _Nullable fileURL,
+                                                                           NSURLResponse * _Nullable response,
+                                                                           NSError * _Nullable error)) {
+    if (completion == nil) {
+        return;
+    }
+    if (remoteURL == nil || directoryURL == nil) {
+        completion(nil, nil, SonoraSharedPlaylistError(1001, @"Shared playlist URL is invalid."));
+        return;
+    }
+
+    NSMutableURLRequest *request = SonoraSharedPlaylistMutableRequest(remoteURL, timeout);
+    NSURLSessionDownloadTask *task = [SonoraSharedPlaylistURLSession() downloadTaskWithRequest:request
+                                                                              completionHandler:^(NSURL * _Nullable location,
+                                                                                                  NSURLResponse * _Nullable response,
+                                                                                                  NSError * _Nullable error) {
+        if (error != nil || location == nil) {
+            completion(nil, response, error ?: SonoraSharedPlaylistError(1002, @"Shared playlist download failed."));
+            return;
+        }
+
+        NSDictionary<NSFileAttributeKey, id> *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:location.path error:nil];
+        unsigned long long downloadedBytes = [attributes[NSFileSize] respondsToSelector:@selector(unsignedLongLongValue)]
+        ? [attributes[NSFileSize] unsignedLongLongValue]
+        : 0ull;
+        if (maximumBytes != ULLONG_MAX && downloadedBytes > maximumBytes) {
+            [NSFileManager.defaultManager removeItemAtURL:location error:nil];
+            completion(nil, response, SonoraSharedPlaylistError(1003, @"Shared playlist file exceeds cache limits."));
+            return;
+        }
+
+        [NSFileManager.defaultManager createDirectoryAtURL:directoryURL
+                               withIntermediateDirectories:YES
+                                                attributes:nil
+                                                     error:nil];
+        NSString *extension = SonoraSharedPlaylistFileExtensionForResponse(response, remoteURL);
+        NSURL *destinationURL = SonoraSharedPlaylistUniqueDestinationURL(directoryURL, suggestedBaseName, extension);
+        NSError *moveError = nil;
+        [NSFileManager.defaultManager removeItemAtURL:destinationURL error:nil];
+        if (![NSFileManager.defaultManager moveItemAtURL:location toURL:destinationURL error:&moveError]) {
+            completion(nil, response, moveError ?: SonoraSharedPlaylistError(1004, @"Could not store shared playlist file."));
+            return;
+        }
+        completion(destinationURL, response, nil);
+    }];
+    [task resume];
 }
 
 NSString *SonoraSharedPlaylistSyntheticID(NSString *remoteID) {
@@ -114,80 +220,94 @@ static NSString *SonoraSharedPlaylistAudioCacheDirectoryPathForStorageDirectory(
     return directory;
 }
 
-NSData * _Nullable SonoraSharedPlaylistDataFromURL(NSURL *url,
-                                                   NSTimeInterval timeout,
-                                                   NSURLResponse * __autoreleasing _Nullable *responseOut) {
+void SonoraSharedPlaylistDataFromURL(NSURL *url,
+                                     NSTimeInterval timeout,
+                                     SonoraSharedPlaylistDataCompletion completion) {
+    if (completion == nil) {
+        return;
+    }
     if (url == nil) {
-        return nil;
+        completion(nil, nil, SonoraSharedPlaylistError(1010, @"Shared playlist URL is invalid."));
+        return;
     }
 
-    __block NSData *result = nil;
-    __block NSURLResponse *capturedResponse = nil;
-    dispatch_group_t group = dispatch_group_create();
-    dispatch_group_enter(group);
-
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = MAX(timeout, 30.0);
+    NSMutableURLRequest *request = SonoraSharedPlaylistMutableRequest(url, timeout);
     NSURLSessionDataTask *task = [SonoraSharedPlaylistURLSession() dataTaskWithRequest:request
                                                                      completionHandler:^(NSData * _Nullable data,
                                                                                          NSURLResponse * _Nullable response,
                                                                                          NSError * _Nullable error) {
-        capturedResponse = response;
         NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-        if (error == nil && data.length > 0 && (http == nil || (http.statusCode >= 200 && http.statusCode < 300))) {
-            result = data;
+        if (error == nil && (http == nil || (http.statusCode >= 200 && http.statusCode < 300))) {
+            completion(data ?: NSData.data, response, nil);
+            return;
         }
-        dispatch_group_leave(group);
+        completion(nil,
+                   response,
+                   error ?: SonoraSharedPlaylistError(http.statusCode ?: 1011, @"Shared playlist request failed."));
     }];
     [task resume];
-
-    if (dispatch_group_wait(group, SonoraSharedPlaylistDispatchTimeout(timeout)) != 0) {
-        [task cancel];
-    }
-
-    if (responseOut != NULL) {
-        *responseOut = capturedResponse;
-    }
-    return result;
 }
 
-NSData * _Nullable SonoraSharedPlaylistPerformRequest(NSURLRequest *request,
-                                                      NSTimeInterval timeout,
-                                                      NSHTTPURLResponse * __autoreleasing _Nullable *responseOut) {
+void SonoraSharedPlaylistPerformRequest(NSURLRequest *request,
+                                        NSTimeInterval timeout,
+                                        SonoraSharedPlaylistRequestCompletion completion) {
+    if (completion == nil) {
+        return;
+    }
     if (request == nil) {
-        return nil;
+        completion(nil, nil, SonoraSharedPlaylistError(1020, @"Shared playlist request is missing."));
+        return;
     }
 
     NSMutableURLRequest *mutableRequest = [request mutableCopy];
     mutableRequest.timeoutInterval = MAX(timeout, 30.0);
 
-    __block NSData *result = nil;
-    __block NSHTTPURLResponse *capturedResponse = nil;
-    dispatch_group_t group = dispatch_group_create();
-    dispatch_group_enter(group);
-
     NSURLSessionDataTask *task = [SonoraSharedPlaylistURLSession() dataTaskWithRequest:mutableRequest
                                                                      completionHandler:^(NSData * _Nullable data,
                                                                                          NSURLResponse * _Nullable response,
                                                                                          NSError * _Nullable error) {
-        if ([response isKindOfClass:NSHTTPURLResponse.class]) {
-            capturedResponse = (NSHTTPURLResponse *)response;
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        if (error == nil && http != nil && http.statusCode >= 200 && http.statusCode < 300) {
+            completion(data ?: NSData.data, http, nil);
+            return;
         }
-        if (error == nil && capturedResponse != nil && capturedResponse.statusCode >= 200 && capturedResponse.statusCode < 300) {
-            result = data ?: NSData.data;
-        }
-        dispatch_group_leave(group);
+        completion(nil,
+                   http,
+                   error ?: SonoraSharedPlaylistError(http.statusCode ?: 1021, @"Shared playlist request failed."));
     }];
     [task resume];
+}
 
-    if (dispatch_group_wait(group, SonoraSharedPlaylistDispatchTimeout(timeout)) != 0) {
-        [task cancel];
+void SonoraSharedPlaylistUploadFileRequest(NSURLRequest *request,
+                                           NSURL *fileURL,
+                                           NSTimeInterval timeout,
+                                           SonoraSharedPlaylistRequestCompletion completion) {
+    if (completion == nil) {
+        return;
+    }
+    if (request == nil || !fileURL.isFileURL) {
+        completion(nil, nil, SonoraSharedPlaylistError(1030, @"Shared playlist upload file is invalid."));
+        return;
     }
 
-    if (responseOut != NULL) {
-        *responseOut = capturedResponse;
-    }
-    return result;
+    NSMutableURLRequest *mutableRequest = [request mutableCopy];
+    mutableRequest.timeoutInterval = MAX(timeout, 30.0);
+
+    NSURLSessionUploadTask *task = [SonoraSharedPlaylistURLSession() uploadTaskWithRequest:mutableRequest
+                                                                                   fromFile:fileURL
+                                                                          completionHandler:^(NSData * _Nullable data,
+                                                                                              NSURLResponse * _Nullable response,
+                                                                                              NSError * _Nullable error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        if (error == nil && http != nil && http.statusCode >= 200 && http.statusCode < 300) {
+            completion(data ?: NSData.data, http, nil);
+            return;
+        }
+        completion(nil,
+                   http,
+                   error ?: SonoraSharedPlaylistError(http.statusCode ?: 1031, @"Shared playlist upload failed."));
+    }];
+    [task resume];
 }
 
 void SonoraSharedPlaylistAppendMultipartText(NSMutableData *body, NSString *boundary, NSString *name, NSString *value) {
@@ -231,48 +351,26 @@ static NSString *SonoraSharedPlaylistSafeFileComponent(NSString *value) {
     return safe.length > 0 ? safe : @"track";
 }
 
-NSURL * _Nullable SonoraSharedPlaylistDownloadedFileURL(NSString *urlString, NSString *suggestedBaseName) {
+void SonoraSharedPlaylistDownloadedFileURL(NSString *urlString,
+                                           NSString *suggestedBaseName,
+                                           SonoraSharedPlaylistDownloadedFileCompletion completion) {
+    if (completion == nil) {
+        return;
+    }
     NSURL *remoteURL = [NSURL URLWithString:urlString];
     if (remoteURL == nil) {
-        return nil;
-    }
-    NSURLResponse *response = nil;
-    NSData *data = SonoraSharedPlaylistDataFromURL(remoteURL, 600.0, &response);
-    if (data.length == 0) {
-        return nil;
+        completion(nil, SonoraSharedPlaylistError(1040, @"Shared playlist URL is invalid."));
+        return;
     }
     NSURL *musicDirectoryURL = [SonoraLibraryManager.sharedManager musicDirectoryURL];
-    NSString *extension = response.suggestedFilename.pathExtension.lowercaseString;
-    if (extension.length == 0) {
-        extension = remoteURL.pathExtension.length > 0 ? remoteURL.pathExtension.lowercaseString : @"";
-    }
-    if (extension.length == 0) {
-        NSString *mimeType = response.MIMEType.lowercaseString;
-        if ([mimeType containsString:@"mp4"]) {
-            extension = @"m4a";
-        } else if ([mimeType containsString:@"aac"]) {
-            extension = @"aac";
-        } else if ([mimeType containsString:@"wav"]) {
-            extension = @"wav";
-        } else if ([mimeType containsString:@"ogg"]) {
-            extension = @"ogg";
-        } else if ([mimeType containsString:@"flac"]) {
-            extension = @"flac";
-        } else {
-            extension = @"mp3";
-        }
-    }
-    NSString *baseName = SonoraSharedPlaylistSafeFileComponent(suggestedBaseName);
-    NSURL *destinationURL = [musicDirectoryURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", baseName, extension]];
-    NSUInteger suffix = 1;
-    while ([NSFileManager.defaultManager fileExistsAtPath:destinationURL.path]) {
-        destinationURL = [musicDirectoryURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@ %lu.%@", baseName, (unsigned long)suffix, extension]];
-        suffix += 1;
-    }
-    if (![data writeToURL:destinationURL atomically:YES]) {
-        return nil;
-    }
-    return destinationURL;
+    SonoraSharedPlaylistDownloadFileToDirectory(remoteURL,
+                                                600.0,
+                                                suggestedBaseName,
+                                                musicDirectoryURL,
+                                                ULLONG_MAX,
+                                                ^(NSURL * _Nullable fileURL, __unused NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        completion(fileURL, error);
+    });
 }
 
 SonoraSharedPlaylistSnapshot * _Nullable SonoraSharedPlaylistSnapshotFromPayload(NSDictionary<NSString *, id> *payload,
@@ -362,43 +460,64 @@ static void SonoraSharedPlaylistPostDidChangeNotification(void) {
     }
 }
 
-void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snapshot) {
+void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snapshot,
+                                             SonoraSharedPlaylistWarmCompletion completion) {
     if (snapshot == nil) {
+        if (completion != nil) {
+            completion(NO);
+        }
         return;
     }
 
-    void (^persistSnapshotIfNeeded)(void) = ^{
-        SonoraSharedPlaylistPerformWithoutDidChangeNotification(^{
-            [SonoraSharedPlaylistStore.sharedStore saveSnapshot:snapshot];
-        });
-    };
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        typedef void (^SonoraSharedPlaylistWarmStep)(dispatch_block_t next);
+        NSMutableArray<SonoraSharedPlaylistWarmStep> *steps = [NSMutableArray array];
+        __block BOOL didPersistUpdates = NO;
 
-    if (snapshot.coverImage == nil && snapshot.coverURL.length > 0) {
-        snapshot.coverImage = SonoraSharedPlaylistFetchImage(snapshot.coverURL);
-        persistSnapshotIfNeeded();
-    }
-    for (SonoraTrack *track in snapshot.tracks) {
-        if (track.artwork != nil || track.identifier.length == 0) {
-            continue;
+        if (snapshot.coverImage == nil && snapshot.coverURL.length > 0) {
+            [steps addObject:[^(dispatch_block_t next) {
+                NSURL *coverURL = [NSURL URLWithString:snapshot.coverURL];
+                if (coverURL == nil) {
+                    next();
+                    return;
+                }
+                SonoraSharedPlaylistDataFromURL(coverURL, 120.0, ^(NSData * _Nullable data, __unused NSURLResponse * _Nullable response, __unused NSError * _Nullable error) {
+                    UIImage *image = SonoraSharedPlaylistImageFromData(data);
+                    if (image != nil) {
+                        snapshot.coverImage = image;
+                        didPersistUpdates = YES;
+                    }
+                    next();
+                });
+            } copy]];
         }
-        NSString *artworkURL = snapshot.trackArtworkURLByTrackID[track.identifier];
-        if (artworkURL.length == 0) {
-            continue;
-        }
-        track.artwork = SonoraSharedPlaylistFetchImage(artworkURL);
-        persistSnapshotIfNeeded();
-    }
-    if (SonoraSettingsCacheOnlinePlaylistTracksEnabled()) {
-        unsigned long long limitBytes = ULLONG_MAX;
-        NSInteger maxMB = SonoraSettingsOnlinePlaylistCacheMaxMB();
-        if (maxMB > 0) {
-            limitBytes = ((unsigned long long)maxMB) * 1024ULL * 1024ULL;
-        } else {
-            limitBytes = 1024ULL * 1024ULL * 1024ULL;
-        }
-        NSString *audioDirectory = SonoraSharedPlaylistAudioCacheDirectoryPath();
-        [NSFileManager.defaultManager createDirectoryAtPath:audioDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+
         [snapshot.tracks enumerateObjectsUsingBlock:^(SonoraTrack * _Nonnull track, NSUInteger idx, __unused BOOL * _Nonnull stop) {
+            if (track.artwork == nil && track.identifier.length > 0) {
+                NSString *artworkURLString = snapshot.trackArtworkURLByTrackID[track.identifier];
+                if (artworkURLString.length > 0) {
+                    [steps addObject:[^(dispatch_block_t next) {
+                        NSURL *artworkURL = [NSURL URLWithString:artworkURLString];
+                        if (artworkURL == nil) {
+                            next();
+                            return;
+                        }
+                        SonoraSharedPlaylistDataFromURL(artworkURL, 120.0, ^(NSData * _Nullable data, __unused NSURLResponse * _Nullable response, __unused NSError * _Nullable error) {
+                            UIImage *image = SonoraSharedPlaylistImageFromData(data);
+                            if (image != nil) {
+                                track.artwork = image;
+                                didPersistUpdates = YES;
+                            }
+                            next();
+                        });
+                    } copy]];
+                }
+            }
+
+            if (!SonoraSettingsCacheOnlinePlaylistTracksEnabled()) {
+                return;
+            }
+
             NSString *remoteFileURL = snapshot.trackRemoteFileURLByTrackID[track.identifier ?: @""];
             if (remoteFileURL.length == 0 && !track.url.isFileURL) {
                 remoteFileURL = track.url.absoluteString ?: @"";
@@ -409,63 +528,66 @@ void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snaps
 
             NSString *existingLocalPath = track.url.isFileURL ? track.url.path : @"";
             if (existingLocalPath.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:existingLocalPath]) {
-                [NSFileManager.defaultManager setAttributes:@{ NSFileModificationDate : NSDate.date }
-                                               ofItemAtPath:existingLocalPath
-                                                      error:nil];
+                [steps addObject:[^(dispatch_block_t next) {
+                    [NSFileManager.defaultManager setAttributes:@{ NSFileModificationDate : NSDate.date }
+                                                   ofItemAtPath:existingLocalPath
+                                                          error:nil];
+                    next();
+                } copy]];
                 return;
             }
 
-            NSURL *remoteURL = [NSURL URLWithString:remoteFileURL];
-            if (remoteURL == nil) {
-                return;
-            }
-            NSURLResponse *response = nil;
-            NSData *audioData = SonoraSharedPlaylistDataFromURL(remoteURL, 600.0, &response);
-            if (audioData.length == 0) {
-                return;
-            }
-            if (limitBytes != ULLONG_MAX && (unsigned long long)audioData.length > limitBytes) {
-                return;
-            }
-
-            NSString *extension = remoteURL.pathExtension.lowercaseString;
-            if (extension.length == 0 && [response isKindOfClass:NSHTTPURLResponse.class]) {
-                NSString *mimeType = ((NSHTTPURLResponse *)response).MIMEType.lowercaseString ?: @"";
-                if ([mimeType containsString:@"mpeg"]) {
-                    extension = @"mp3";
-                } else if ([mimeType containsString:@"mp4"] || [mimeType containsString:@"aac"]) {
-                    extension = @"m4a";
-                } else if ([mimeType containsString:@"wav"]) {
-                    extension = @"wav";
-                } else if ([mimeType containsString:@"flac"]) {
-                    extension = @"flac";
+            NSInteger maxMB = SonoraSettingsOnlinePlaylistCacheMaxMB();
+            unsigned long long limitBytes = (maxMB > 0)
+            ? ((unsigned long long)maxMB) * 1024ULL * 1024ULL
+            : (1024ULL * 1024ULL * 1024ULL);
+            NSURL *audioDirectoryURL = [NSURL fileURLWithPath:SonoraSharedPlaylistAudioCacheDirectoryPath() isDirectory:YES];
+            NSString *suggestedName = [NSString stringWithFormat:@"%@_%lu",
+                                       snapshot.remoteID.length > 0 ? snapshot.remoteID : @"shared",
+                                       (unsigned long)idx];
+            [steps addObject:[^(dispatch_block_t next) {
+                NSURL *remoteURL = [NSURL URLWithString:remoteFileURL];
+                if (remoteURL == nil) {
+                    next();
+                    return;
                 }
-            }
-            if (extension.length == 0) {
-                extension = @"audio";
-            }
+                SonoraSharedPlaylistDownloadFileToDirectory(remoteURL,
+                                                            600.0,
+                                                            suggestedName,
+                                                            audioDirectoryURL,
+                                                            limitBytes,
+                                                            ^(NSURL * _Nullable fileURL, __unused NSURLResponse * _Nullable response, __unused NSError * _Nullable error) {
+                    if (fileURL != nil) {
+                        track.url = fileURL;
+                        didPersistUpdates = YES;
+                    }
+                    next();
+                });
+            } copy]];
+        }];
 
-            NSString *fileName = [NSString stringWithFormat:@"%@_%lu.%@", snapshot.remoteID.length > 0 ? snapshot.remoteID : @"shared",
-                                  (unsigned long)idx,
-                                  extension];
-            NSString *path = [audioDirectory stringByAppendingPathComponent:fileName];
-            NSUInteger suffix = 1;
-            while ([NSFileManager.defaultManager fileExistsAtPath:path]) {
-                fileName = [NSString stringWithFormat:@"%@_%lu_%lu.%@",
-                            snapshot.remoteID.length > 0 ? snapshot.remoteID : @"shared",
-                            (unsigned long)idx,
-                            (unsigned long)suffix,
-                            extension];
-                path = [audioDirectory stringByAppendingPathComponent:fileName];
-                suffix += 1;
-            }
-            if (![audioData writeToFile:path atomically:YES]) {
+        __block void (^runStepAtIndex)(NSUInteger);
+        runStepAtIndex = ^(NSUInteger index) {
+            if (index >= steps.count) {
+                if (didPersistUpdates) {
+                    SonoraSharedPlaylistPerformWithoutDidChangeNotification(^{
+                        [SonoraSharedPlaylistStore.sharedStore saveSnapshot:snapshot];
+                    });
+                }
+                if (completion != nil) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        completion(didPersistUpdates);
+                    });
+                }
                 return;
             }
-            track.url = [NSURL fileURLWithPath:path];
-            persistSnapshotIfNeeded();
-        }];
-    }
+            SonoraSharedPlaylistWarmStep step = steps[index];
+            step(^{
+                runStepAtIndex(index + 1);
+            });
+        };
+        runStepAtIndex(0);
+    });
 }
 
 @implementation SonoraSharedPlaylistSnapshot
@@ -475,6 +597,7 @@ void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snaps
 
 @property (nonatomic, strong) NSUserDefaults *userDefaults;
 @property (nonatomic, strong) NSURL *storageDirectoryURL;
+@property (nonatomic, strong) NSURL *manifestFileURL;
 
 @end
 
@@ -511,15 +634,57 @@ void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snaps
                            withIntermediateDirectories:YES
                                             attributes:nil
                                                  error:nil];
+    _manifestFileURL = [_storageDirectoryURL URLByAppendingPathComponent:SonoraSharedPlaylistManifestFileName];
+    [self migrateLegacyStoredDictionariesIfNeeded];
     return self;
 }
 
-- (NSArray<NSDictionary<NSString *, id> *> *)storedDictionaries {
+- (NSArray<NSDictionary<NSString *, id> *> *)legacyStoredDictionaries {
     NSArray *items = [self.userDefaults arrayForKey:SonoraSharedPlaylistDefaultsKey];
     if (![items isKindOfClass:NSArray.class]) {
         return @[];
     }
     return items;
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *)manifestStoredDictionaries {
+    NSData *data = [NSData dataWithContentsOfURL:self.manifestFileURL options:0 error:nil];
+    if (data.length == 0) {
+        return @[];
+    }
+    id payload = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![payload isKindOfClass:NSArray.class]) {
+        return @[];
+    }
+    return (NSArray<NSDictionary<NSString *, id> *> *)payload;
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *)storedDictionaries {
+    BOOL manifestExists = [NSFileManager.defaultManager fileExistsAtPath:self.manifestFileURL.path];
+    NSArray<NSDictionary<NSString *, id> *> *items = [self manifestStoredDictionaries];
+    if (manifestExists || items.count > 0) {
+        return items;
+    }
+    return [self legacyStoredDictionaries];
+}
+
+- (void)writeStoredDictionaries:(NSArray<NSDictionary<NSString *, id> *> *)items {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:(items ?: @[]) options:0 error:nil];
+    if (data.length > 0 || items.count == 0) {
+        [data writeToURL:self.manifestFileURL options:NSDataWritingAtomic error:nil];
+    }
+    [self.userDefaults removeObjectForKey:SonoraSharedPlaylistDefaultsKey];
+}
+
+- (void)migrateLegacyStoredDictionariesIfNeeded {
+    if ([NSFileManager.defaultManager fileExistsAtPath:self.manifestFileURL.path]) {
+        return;
+    }
+    NSArray<NSDictionary<NSString *, id> *> *legacyItems = [self legacyStoredDictionaries];
+    if (legacyItems.count == 0) {
+        return;
+    }
+    [self writeStoredDictionaries:legacyItems];
 }
 
 - (NSArray<SonoraPlaylist *> *)likedPlaylists {
@@ -552,7 +717,7 @@ void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snaps
         }
         SonoraSharedPlaylistSnapshot *snapshot = [self snapshotForPlaylistID:playlistID];
         if (snapshot != nil) {
-            SonoraSharedPlaylistWarmPersistentCache(snapshot);
+            SonoraSharedPlaylistWarmPersistentCache(snapshot, nil);
         }
     }
 }
@@ -681,8 +846,7 @@ void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snaps
     dictionary[@"tracks"] = trackItems.copy;
 
     [stored insertObject:dictionary.copy atIndex:0];
-    [self.userDefaults setObject:stored.copy forKey:SonoraSharedPlaylistDefaultsKey];
-    [self.userDefaults synchronize];
+    [self writeStoredDictionaries:stored.copy];
     if (!SonoraSharedPlaylistShouldSuppressDidChangeNotification()) {
         SonoraSharedPlaylistPostDidChangeNotification();
     }
@@ -724,8 +888,7 @@ void SonoraSharedPlaylistWarmPersistentCache(SonoraSharedPlaylistSnapshot *snaps
         }
     }
     [stored removeObjectsAtIndexes:matches];
-    [self.userDefaults setObject:stored.copy forKey:SonoraSharedPlaylistDefaultsKey];
-    [self.userDefaults synchronize];
+    [self writeStoredDictionaries:stored.copy];
     if (!SonoraSharedPlaylistShouldSuppressDidChangeNotification()) {
         SonoraSharedPlaylistPostDidChangeNotification();
     }
