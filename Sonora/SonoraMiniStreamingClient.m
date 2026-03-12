@@ -49,6 +49,14 @@ static NSString *SonoraMiniStreamingCurrentEngineValue(void) {
     return (SonoraSettingsStreamingSearchEngine() == SonoraStreamingSearchEngineYouTube) ? @"youtube" : @"spotify";
 }
 
+static NSString *SonoraMiniStreamingPreferredYouTubeArtworkURL(NSString *trackID, NSString *fallbackURL) {
+    NSString *normalizedTrackID = SonoraTrimmedStringValue(trackID);
+    if (normalizedTrackID.length == 11 && [SonoraMiniStreamingCurrentEngineValue() isEqualToString:@"youtube"]) {
+        return [NSString stringWithFormat:@"https://i.ytimg.com/vi/%@/maxresdefault.jpg", normalizedTrackID];
+    }
+    return SonoraTrimmedStringValue(fallbackURL);
+}
+
 @implementation SonoraMiniStreamingTrack
 @end
 
@@ -400,7 +408,7 @@ static NSString *SonoraMiniStreamingCurrentEngineValue(void) {
             artworkURL = candidateURL;
         }
     }
-    track.artworkURL = artworkURL ?: @"";
+    track.artworkURL = SonoraMiniStreamingPreferredYouTubeArtworkURL(trackID, artworkURL);
 
     NSInteger durationMS = [item[@"duration_ms"] respondsToSelector:@selector(integerValue)] ? [item[@"duration_ms"] integerValue] : 0;
     if (durationMS <= 0) {
@@ -1398,6 +1406,7 @@ static NSString *SonoraMiniStreamingCurrentEngineValue(void) {
     if (resolvedArtwork.length == 0) {
         resolvedArtwork = SonoraTrimmedStringValue(dataNode[@"cover"]);
     }
+    resolvedArtwork = SonoraMiniStreamingPreferredYouTubeArtworkURL(trackID, resolvedArtwork);
     if (resolvedExtension.length == 0) {
         NSURL *downloadURL = [NSURL URLWithString:downloadLink];
         resolvedExtension = SonoraTrimmedStringValue(downloadURL.pathExtension).lowercaseString;
