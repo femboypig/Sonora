@@ -54,15 +54,15 @@ void SonoraSettingsSetArtworkStyleIndex(NSInteger value) {
     [SonoraSettingsDefaults() setInteger:value forKey:SonoraSettingsArtworkStyleKey];
 }
 
-NSInteger SonoraSettingsMyWaveLook(void) {
+SonoraMyWaveLook SonoraSettingsMyWaveLook(void) {
     NSUserDefaults *defaults = SonoraSettingsDefaults();
     if ([defaults objectForKey:SonoraSettingsMyWaveLookKey] == nil) {
-        return 1;
+        return SonoraMyWaveLookContours;
     }
-    return [defaults integerForKey:SonoraSettingsMyWaveLookKey];
+    return (SonoraMyWaveLook)[defaults integerForKey:SonoraSettingsMyWaveLookKey];
 }
 
-void SonoraSettingsSetMyWaveLook(NSInteger value) {
+void SonoraSettingsSetMyWaveLook(SonoraMyWaveLook value) {
     [SonoraSettingsDefaults() setInteger:value forKey:SonoraSettingsMyWaveLookKey];
 }
 
