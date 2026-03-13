@@ -14,16 +14,18 @@ private enum SonoraWidgetConfig {
     static let deepLinkHost = "widget"
     static let deepLinkPath = "/play"
     static let deepLinkTrackIDQueryItem = "trackID"
+    static let accentHexDefaultsKey = "sonora.settings.accentHex"
+    static let legacyAccentDefaultsKey = "sonora.settings.accentColor"
 }
 
 enum SonoraWidgetSongSource: String {
-    case lovely
+    case songOfTheDay
     case random
 
     var title: String {
         switch self {
-        case .lovely:
-            return "Lovely"
+        case .songOfTheDay:
+            return "Song of the Day"
         case .random:
             return "Random"
         }
@@ -38,7 +40,7 @@ extension SonoraWidgetSongSource: AppEnum {
 
     static var caseDisplayRepresentations: [SonoraWidgetSongSource: DisplayRepresentation] {
         [
-            .lovely: DisplayRepresentation(title: "Lovely"),
+            .songOfTheDay: DisplayRepresentation(title: "Song of the Day"),
             .random: DisplayRepresentation(title: "Random")
         ]
     }
@@ -47,9 +49,9 @@ extension SonoraWidgetSongSource: AppEnum {
 @available(iOS 17.0, *)
 struct SonoraWidgetConfigurationIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource { "Sonora Widget" }
-    static var description: IntentDescription { IntentDescription("Choose whether the widget shows lovely songs or random songs.") }
+    static var description: IntentDescription { IntentDescription("Choose Song of the Day or Random songs.") }
 
-    @Parameter(title: "Show", default: .lovely)
+    @Parameter(title: "Source", default: .songOfTheDay)
     var source: SonoraWidgetSongSource
 }
 
@@ -88,9 +90,9 @@ private enum LovelyEntryFactory {
     }
 
     static func defaultSource() -> SonoraWidgetSongSource {
-        let lovely = sharedTracks(for: .lovely)
-        if !lovely.isEmpty {
-            return .lovely
+        let songOfTheDayTracks = sharedTracks(for: .songOfTheDay)
+        if !songOfTheDayTracks.isEmpty {
+            return .songOfTheDay
         }
 
         let random = sharedTracks(for: .random)
@@ -98,12 +100,12 @@ private enum LovelyEntryFactory {
             return .random
         }
 
-        return .lovely
+        return .songOfTheDay
     }
 
     private static func sharedTracks(for source: SonoraWidgetSongSource) -> [LovelyTrack] {
         switch source {
-        case .lovely:
+        case .songOfTheDay:
             let lovely = loadTracks(key: SonoraWidgetConfig.lovelyTracksDefaultsKey)
             if !lovely.isEmpty {
                 return lovely
@@ -167,9 +169,9 @@ private struct LovelyIntentProvider: AppIntentTimelineProvider {
 
     func placeholder(in context: Context) -> LovelyEntry {
         LovelyEntry(date: Date(),
-                    source: .lovely,
+                    source: .songOfTheDay,
                     track: LovelyTrack(id: "placeholder",
-                                       title: "Lovely Song",
+                                       title: "Song of the Day",
                                        artist: "Sonora",
                                        artworkURL: nil,
                                        artworkThumb: nil))
@@ -197,9 +199,9 @@ private struct LovelyIntentProvider: AppIntentTimelineProvider {
 private struct LovelyLegacyProvider: TimelineProvider {
     func placeholder(in context: Context) -> LovelyEntry {
         LovelyEntry(date: Date(),
-                    source: .lovely,
+                    source: .songOfTheDay,
                     track: LovelyTrack(id: "placeholder",
-                                       title: "Lovely Song",
+                                       title: "Song of the Day",
                                        artist: "Sonora",
                                        artworkURL: nil,
                                        artworkThumb: nil))
@@ -227,80 +229,423 @@ private struct LovelyLegacyProvider: TimelineProvider {
 
 private struct LovelyWidgetView: View {
     let entry: LovelyEntry
+    @Environment(\.widgetFamily) private var family
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.widgetRenderingMode) private var renderingMode
 
     var body: some View {
-        let isDark = (colorScheme == .dark)
-        let isVibrant = (renderingMode == .vibrant)
-        let background = isVibrant ? (isDark ? Color.black : Color.white) : (isDark ? Color.black : Color.white)
-        let primaryText = isVibrant ? (isDark ? Color.white : Color.black) : (isDark ? Color.white : Color.black)
-        let secondaryText = isVibrant
-        ? (isDark ? Color.white.opacity(0.78) : Color.black.opacity(0.70))
-        : (isDark ? Color.white.opacity(0.68) : Color.black.opacity(0.62))
-
-        ZStack(alignment: .bottomLeading) {
-            background
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text(entry.source.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(secondaryText)
-                        .textCase(.uppercase)
-
-                    Spacer(minLength: 0)
-
-                    if let artwork = artworkImage {
-                        Image(uiImage: artwork)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 36, height: 36)
-                            .clipped()
-                            .cornerRadius(7)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .stroke(isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.10), lineWidth: 1)
-                            )
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                if let track = entry.track {
-                    Text(track.title)
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(primaryText)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.74)
-
-                    if !track.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       track.artist.lowercased() != "unknown artist" {
-                        Text(track.artist)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(secondaryText)
-                            .lineLimit(1)
-                    }
-                } else {
-                    Text("Open Sonora to prepare songs")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(primaryText.opacity(0.88))
-                        .lineLimit(2)
-                }
-
-                Text("Tap to play")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(secondaryText.opacity(0.95))
-                    .padding(.top, 2)
-            }
-            .padding(14)
-        }
+        cardImageView
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        .clipped()
+        .clipShape(ContainerRelativeShape())
         .widgetURL(widgetURL)
-        .m2WidgetContainerBackground {
-            background
+        .containerBackground(for: .widget) {
+            Color.clear
         }
-        .m2WidgetTint(Color.clear)
+    }
+
+    @ViewBuilder
+    private var cardImageView: some View {
+        if #available(iOSApplicationExtension 18.0, *), !isFullColor {
+            Image(uiImage: renderedCardImage)
+                .resizable()
+                .widgetAccentedRenderingMode(.fullColor)
+                .scaledToFill()
+        } else {
+            Image(uiImage: renderedCardImage)
+                .resizable()
+                .scaledToFill()
+        }
+    }
+
+    private var isSmall: Bool {
+        family == .systemSmall
+    }
+
+    private var isDark: Bool {
+        colorScheme == .dark
+    }
+
+    private var isFullColor: Bool {
+        renderingMode == .fullColor
+    }
+
+    private var renderedCardImage: UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 3
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: metrics.canvasSize, format: format)
+
+        return renderer.image { context in
+            let bounds = CGRect(origin: .zero, size: metrics.canvasSize)
+            let palette = palette
+            let cardPath = UIBezierPath(roundedRect: bounds, cornerRadius: metrics.cornerRadius)
+            palette.background.setFill()
+            cardPath.fill()
+            palette.border.setStroke()
+            cardPath.lineWidth = 1
+            cardPath.stroke()
+
+            let content = bounds.insetBy(dx: metrics.outerInset, dy: metrics.outerInset)
+            drawCapsuleLabel(in: content, palette: palette)
+            drawArtwork(in: content, context: context.cgContext, palette: palette)
+            drawTextBlock(in: content, palette: palette)
+        }
+    }
+
+    private var palette: WidgetPalette {
+        let accent = resolvedAccentColor
+        let baseBackground = isDark
+        ? UIColor(red: 0.07, green: 0.07, blue: 0.08, alpha: 1)
+        : UIColor(red: 0.96, green: 0.96, blue: 0.94, alpha: 1)
+        let title = isDark
+        ? UIColor.white
+        : UIColor(red: 0.08, green: 0.09, blue: 0.10, alpha: 1)
+        let subtitle = isDark
+        ? UIColor.white.withAlphaComponent(0.68)
+        : UIColor(red: 0.33, green: 0.34, blue: 0.35, alpha: 1)
+        let borderBase = blend(baseBackground, accent, ratio: isDark ? 0.24 : 0.16)
+        return WidgetPalette(
+            background: baseBackground,
+            border: borderBase.withAlphaComponent(isDark ? 0.30 : 0.12),
+            accent: accent,
+            title: title,
+            subtitle: subtitle,
+            brand: blend(title, accent, ratio: 0.24),
+            artworkPlaceholder: blend(baseBackground, accent, ratio: isDark ? 0.28 : 0.14),
+            artworkBorder: accent.withAlphaComponent(isDark ? 0.34 : 0.20)
+        )
+    }
+
+    private var metrics: WidgetMetrics {
+        isSmall
+        ? WidgetMetrics(
+            canvasSize: CGSize(width: 170, height: 170),
+            cornerRadius: 36,
+            outerInset: 14,
+            artworkSize: 46,
+            titleFontSize: 17,
+            artistFontSize: 11,
+            brandFontSize: 9,
+            titleHeight: 46
+        )
+        : WidgetMetrics(
+            canvasSize: CGSize(width: 364, height: 170),
+            cornerRadius: 36,
+            outerInset: 16,
+            artworkSize: 54,
+            titleFontSize: 18,
+            artistFontSize: 12,
+            brandFontSize: 9,
+            titleHeight: 50
+        )
+    }
+
+    private var titleText: String {
+        entry.track?.title ?? "Open Sonora"
+    }
+
+    private var artistText: String {
+        let artist = entry.track?.artist.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if artist.isEmpty || artist.lowercased() == "unknown artist" {
+            return entry.track == nil ? "Add tracks in Sonora" : "Sonora"
+        }
+        return artist
+    }
+
+    private var sourceLabelText: String {
+        entry.source == .songOfTheDay ? "Song of the Day" : "Random"
+    }
+
+    private func drawCapsuleLabel(in content: CGRect, palette: WidgetPalette) {
+        let font = UIFont.systemFont(ofSize: isSmall ? 9 : 10, weight: .semibold)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: palette.accent
+        ]
+        let size = (sourceLabelText as NSString).size(withAttributes: attributes)
+        let rect = CGRect(
+            x: content.minX,
+            y: content.minY + 2,
+            width: size.width + 18,
+            height: size.height + 8
+        )
+        let path = UIBezierPath(roundedRect: rect, cornerRadius: rect.height / 2)
+        palette.artworkPlaceholder.setFill()
+        path.fill()
+        palette.artworkBorder.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        (sourceLabelText as NSString).draw(
+            in: rect.insetBy(dx: 9, dy: 4),
+            withAttributes: attributes
+        )
+    }
+
+    private func drawArtwork(in content: CGRect, context cg: CGContext, palette: WidgetPalette) {
+        let rect = CGRect(
+            x: content.maxX - metrics.artworkSize,
+            y: content.minY,
+            width: metrics.artworkSize,
+            height: metrics.artworkSize
+        )
+
+        cg.saveGState()
+        let path = UIBezierPath(roundedRect: rect, cornerRadius: 14)
+        path.addClip()
+        if let artwork = artworkImage {
+            artwork.draw(in: rect)
+        } else {
+            palette.artworkPlaceholder.setFill()
+            path.fill()
+            let config = UIImage.SymbolConfiguration(pointSize: metrics.artworkSize * 0.34, weight: .semibold)
+            let tint = palette.title.withAlphaComponent(0.82)
+            if let note = UIImage(systemName: "music.note", withConfiguration: config)?
+                .withTintColor(tint, renderingMode: .alwaysOriginal) {
+                let noteRect = CGRect(
+                    x: rect.midX - (note.size.width / 2),
+                    y: rect.midY - (note.size.height / 2),
+                    width: note.size.width,
+                    height: note.size.height
+                )
+                note.draw(in: noteRect)
+            }
+        }
+        cg.restoreGState()
+
+        let border = UIBezierPath(roundedRect: rect, cornerRadius: 14)
+        palette.artworkBorder.setStroke()
+        border.lineWidth = 1
+        border.stroke()
+    }
+
+    private func drawTextBlock(in content: CGRect, palette: WidgetPalette) {
+        let brandFont = UIFont.monospacedSystemFont(ofSize: metrics.brandFontSize, weight: .semibold)
+        let titleFont = UIFont.systemFont(ofSize: metrics.titleFontSize, weight: .bold)
+        let artistFont = UIFont.systemFont(ofSize: metrics.artistFontSize, weight: .medium)
+
+        let brandText = "SONORA"
+        let brandAttributes: [NSAttributedString.Key: Any] = [
+            .font: brandFont,
+            .foregroundColor: palette.brand
+        ]
+        let brandSize = (brandText as NSString).size(withAttributes: brandAttributes)
+        let brandRect = CGRect(
+            x: content.maxX - brandSize.width,
+            y: content.maxY - brandSize.height,
+            width: brandSize.width,
+            height: brandSize.height
+        )
+        (brandText as NSString).draw(in: brandRect, withAttributes: brandAttributes)
+
+        let artistAttributes: [NSAttributedString.Key: Any] = [
+            .font: artistFont,
+            .foregroundColor: palette.subtitle
+        ]
+        let artistHeight = artistFont.lineHeight
+        let textRight = min(brandRect.minX - 10, content.maxX - (isSmall ? 0 : metrics.artworkSize + 14))
+        let textWidth = max(textRight - content.minX, 72)
+        let artistRect = CGRect(
+            x: content.minX,
+            y: content.maxY - artistHeight,
+            width: textWidth,
+            height: artistHeight
+        )
+
+        let titleStyle = NSMutableParagraphStyle()
+        titleStyle.lineBreakMode = .byTruncatingTail
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: titleFont,
+            .foregroundColor: palette.title,
+            .paragraphStyle: titleStyle
+        ]
+        let measuredTitleBounds = (titleText as NSString).boundingRect(
+            with: CGSize(width: textWidth, height: metrics.titleHeight),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: titleAttributes,
+            context: nil
+        )
+        let measuredTitleHeight = max(
+            titleFont.lineHeight,
+            min(ceil(measuredTitleBounds.height), metrics.titleHeight)
+        )
+        let titleRect = CGRect(
+            x: content.minX,
+            y: artistRect.minY - measuredTitleHeight - 2,
+            width: textWidth,
+            height: measuredTitleHeight
+        )
+
+        (titleText as NSString).draw(
+            with: titleRect,
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: titleAttributes,
+            context: nil
+        )
+        (artistText as NSString).draw(in: artistRect, withAttributes: artistAttributes)
+    }
+
+    private var resolvedAccentColor: UIColor {
+        if let image = artworkImage, let artworkAccent = dominantAccentColor(from: image) {
+            return artworkAccent
+        }
+        return settingsAccentColor
+    }
+
+    private var settingsAccentColor: UIColor {
+        guard let defaults = UserDefaults(suiteName: SonoraWidgetConfig.appGroupID) else {
+            return legacyAccentColor(for: 0)
+        }
+        if let hex = defaults.string(forKey: SonoraWidgetConfig.accentHexDefaultsKey),
+           let color = colorFromHex(hex) {
+            return normalizedAccentColor(color)
+        }
+        return legacyAccentColor(for: defaults.integer(forKey: SonoraWidgetConfig.legacyAccentDefaultsKey))
+    }
+
+    private func legacyAccentColor(for raw: Int) -> UIColor {
+        switch raw {
+        case 1:
+            return UIColor(red: 0.31, green: 0.64, blue: 1.0, alpha: 1.0)
+        case 2:
+            return UIColor(red: 0.22, green: 0.83, blue: 0.62, alpha: 1.0)
+        case 3:
+            return UIColor(red: 1.0, green: 0.48, blue: 0.40, alpha: 1.0)
+        default:
+            return UIColor(red: 1.0, green: 0.83, blue: 0.08, alpha: 1.0)
+        }
+    }
+
+    private func colorFromHex(_ hexString: String) -> UIColor? {
+        var normalized = hexString.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if normalized.hasPrefix("#") {
+            normalized.removeFirst()
+        }
+        guard normalized.count == 6, let rgb = Int(normalized, radix: 16) else {
+            return nil
+        }
+        return UIColor(
+            red: CGFloat((rgb >> 16) & 0xFF) / 255.0,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255.0,
+            blue: CGFloat(rgb & 0xFF) / 255.0,
+            alpha: 1.0
+        )
+    }
+
+    private func blend(_ base: UIColor, _ accent: UIColor, ratio: CGFloat) -> UIColor {
+        var br: CGFloat = 0
+        var bg: CGFloat = 0
+        var bb: CGFloat = 0
+        var ba: CGFloat = 0
+        var ar: CGFloat = 0
+        var ag: CGFloat = 0
+        var ab: CGFloat = 0
+        var aa: CGFloat = 0
+        guard base.getRed(&br, green: &bg, blue: &bb, alpha: &ba),
+              accent.getRed(&ar, green: &ag, blue: &ab, alpha: &aa) else {
+            return base
+        }
+        let clamped = min(max(ratio, 0), 1)
+        let inverse = 1 - clamped
+        return UIColor(
+            red: (br * inverse) + (ar * clamped),
+            green: (bg * inverse) + (ag * clamped),
+            blue: (bb * inverse) + (ab * clamped),
+            alpha: 1
+        )
+    }
+
+    private func normalizedAccentColor(_ color: UIColor) -> UIColor {
+        var hue: CGFloat = 0
+        var saturation: CGFloat = 0
+        var brightness: CGFloat = 0
+        var alpha: CGFloat = 0
+        guard color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha) else {
+            return color
+        }
+        let adjustedSaturation = max(saturation, 0.38)
+        let adjustedBrightness = isDark
+        ? min(max(brightness, 0.72), 0.94)
+        : min(max(brightness, 0.44), 0.82)
+        return UIColor(hue: hue, saturation: adjustedSaturation, brightness: adjustedBrightness, alpha: 1.0)
+    }
+
+    private func dominantAccentColor(from image: UIImage) -> UIColor? {
+        guard let cgImage = image.cgImage else {
+            return nil
+        }
+
+        let sampleSide = 24
+        let bytesPerPixel = 4
+        let bytesPerRow = sampleSide * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: sampleSide * sampleSide * bytesPerPixel)
+
+        guard let context = CGContext(
+            data: &pixels,
+            width: sampleSide,
+            height: sampleSide,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .medium
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: sampleSide, height: sampleSide))
+
+        struct Bucket {
+            var weight: CGFloat = 0
+            var red: CGFloat = 0
+            var green: CGFloat = 0
+            var blue: CGFloat = 0
+        }
+
+        var buckets: [Int: Bucket] = [:]
+
+        for index in stride(from: 0, to: pixels.count, by: bytesPerPixel) {
+            let red = CGFloat(pixels[index]) / 255.0
+            let green = CGFloat(pixels[index + 1]) / 255.0
+            let blue = CGFloat(pixels[index + 2]) / 255.0
+            let alpha = CGFloat(pixels[index + 3]) / 255.0
+            if alpha < 0.35 {
+                continue
+            }
+
+            var hue: CGFloat = 0
+            var saturation: CGFloat = 0
+            var brightness: CGFloat = 0
+            var resolvedAlpha: CGFloat = 0
+            let color = UIColor(red: red, green: green, blue: blue, alpha: 1)
+            guard color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &resolvedAlpha) else {
+                continue
+            }
+            if brightness < 0.16 || saturation < 0.18 {
+                continue
+            }
+
+            let key = (Int(hue * 12) << 8) | (Int(saturation * 4) << 4) | Int(brightness * 4)
+            let weight = (0.45 + (saturation * 0.55)) * (0.55 + (brightness * 0.45))
+            var bucket = buckets[key] ?? Bucket()
+            bucket.weight += weight
+            bucket.red += red * weight
+            bucket.green += green * weight
+            bucket.blue += blue * weight
+            buckets[key] = bucket
+        }
+
+        guard let best = buckets.values.max(by: { $0.weight < $1.weight }), best.weight > 0 else {
+            return nil
+        }
+
+        let color = UIColor(
+            red: best.red / best.weight,
+            green: best.green / best.weight,
+            blue: best.blue / best.weight,
+            alpha: 1
+        )
+        return normalizedAccentColor(color)
     }
 
     private var artworkImage: UIImage? {
@@ -332,6 +677,28 @@ private struct LovelyWidgetView: View {
 
         return components.url ?? URL(string: "sonora://widget/play")!
     }
+
+    private struct WidgetPalette {
+        let background: UIColor
+        let border: UIColor
+        let accent: UIColor
+        let title: UIColor
+        let subtitle: UIColor
+        let brand: UIColor
+        let artworkPlaceholder: UIColor
+        let artworkBorder: UIColor
+    }
+
+    private struct WidgetMetrics {
+        let canvasSize: CGSize
+        let cornerRadius: CGFloat
+        let outerInset: CGFloat
+        let artworkSize: CGFloat
+        let titleFontSize: CGFloat
+        let artistFontSize: CGFloat
+        let brandFontSize: CGFloat
+        let titleHeight: CGFloat
+    }
 }
 
 @available(iOS 17.0, *)
@@ -343,11 +710,10 @@ struct SonoraLovelyWidget: Widget {
                                intent: SonoraWidgetConfigurationIntent.self,
                                provider: LovelyIntentProvider()) { entry in
             LovelyWidgetView(entry: entry)
-                .m2WidgetAccentable(false)
         }
         .contentMarginsDisabled()
         .configurationDisplayName("Sonora Song")
-        .description("Pick Lovely or Random in widget edit mode.")
+        .description("Pick Song of the Day or Random in widget edit mode.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
@@ -358,40 +724,10 @@ struct SonoraLovelyWidgetLegacy: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: LovelyLegacyProvider()) { entry in
             LovelyWidgetView(entry: entry)
-                .m2WidgetAccentable(false)
         }
         .contentMarginsDisabled()
         .configurationDisplayName("Sonora Song")
         .description("Shows songs prepared in Sonora.")
         .supportedFamilies([.systemSmall, .systemMedium])
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func m2WidgetAccentable(_ accentable: Bool) -> some View {
-        if #available(iOSApplicationExtension 17.0, *) {
-            self.widgetAccentable(accentable)
-        } else {
-            self
-        }
-    }
-
-    @ViewBuilder
-    func m2WidgetTint(_ tint: Color) -> some View {
-        if #available(iOSApplicationExtension 17.0, *) {
-            self.tint(tint)
-        } else {
-            self
-        }
-    }
-
-    @ViewBuilder
-    func m2WidgetContainerBackground<Background: View>(@ViewBuilder _ background: () -> Background) -> some View {
-        if #available(iOSApplicationExtension 17.0, *) {
-            self.containerBackground(for: .widget, content: background)
-        } else {
-            self.background(background())
-        }
     }
 }

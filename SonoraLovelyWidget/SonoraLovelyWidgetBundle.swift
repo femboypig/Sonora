@@ -4,6 +4,6 @@ import WidgetKit
 @main
 struct SonoraLovelyWidgetBundle: WidgetBundle {
     var body: some Widget {
-        SonoraLovelyWidgetLegacy()
+        SonoraLovelyWidget()
     }
 }
