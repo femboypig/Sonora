@@ -90,6 +90,14 @@ static NSString *SonoraServicesNormalizedDownloadedTrackArtist(id value) {
 }
 
 static UIImage *SonoraSquareArtworkImage(UIImage *image);
+static NSData *SonoraID3v23TagData(NSString *title, NSString *artist, UIImage *artwork);
+static NSUInteger SonoraID3v2TagLength(NSData *fileData);
+static NSUInteger SonoraID3v1TagLength(NSData *fileData);
+static NSData *SonoraID3v23TextFrameData(NSString *frameIdentifier, NSString *value);
+static NSData *SonoraID3v23AttachedPictureFrameData(UIImage *artwork);
+static NSData *SonoraID3v23FrameData(NSString *frameIdentifier, NSData *payload);
+static NSData *SonoraUTF16LEStringData(NSString *value, BOOL includeTerminator);
+static NSData *SonoraSyncSafeSizeData(NSUInteger size);
 
 static AVMutableMetadataItem *SonoraID3StringMetadataItem(AVMetadataIdentifier identifier, NSString *value) {
     NSString *trimmedValue = SonoraServicesTrimmedStringValue(value);
@@ -192,6 +200,158 @@ static UIImage *SonoraSquareArtworkImage(UIImage *image) {
         [image drawAtPoint:CGPointMake(-CGRectGetMinX(cropRect), -CGRectGetMinY(cropRect))];
     }];
     return cropped ?: image;
+}
+
+static NSData *SonoraID3v23TagData(NSString *title, NSString *artist, UIImage *artwork) {
+    NSMutableData *framesData = [[NSMutableData alloc] init];
+
+    NSData *titleFrame = SonoraID3v23TextFrameData(@"TIT2", title);
+    if (titleFrame.length > 0) {
+        [framesData appendData:titleFrame];
+    }
+
+    NSData *artistFrame = SonoraID3v23TextFrameData(@"TPE1", artist);
+    if (artistFrame.length > 0) {
+        [framesData appendData:artistFrame];
+    }
+
+    NSData *bandFrame = SonoraID3v23TextFrameData(@"TPE2", artist);
+    if (bandFrame.length > 0) {
+        [framesData appendData:bandFrame];
+    }
+
+    NSData *artworkFrame = SonoraID3v23AttachedPictureFrameData(artwork);
+    if (artworkFrame.length > 0) {
+        [framesData appendData:artworkFrame];
+    }
+
+    NSMutableData *tagData = [[NSMutableData alloc] initWithCapacity:(10 + framesData.length)];
+    const uint8_t header[3] = { 'I', 'D', '3' };
+    [tagData appendBytes:header length:sizeof(header)];
+
+    const uint8_t version[2] = { 3, 0 };
+    [tagData appendBytes:version length:sizeof(version)];
+
+    uint8_t flags = 0;
+    [tagData appendBytes:&flags length:1];
+    [tagData appendData:SonoraSyncSafeSizeData(framesData.length)];
+    [tagData appendData:framesData];
+    return tagData;
+}
+
+static NSUInteger SonoraID3v2TagLength(NSData *fileData) {
+    if (fileData.length < 10) {
+        return 0;
+    }
+
+    const uint8_t *bytes = fileData.bytes;
+    if (!(bytes[0] == 'I' && bytes[1] == 'D' && bytes[2] == '3')) {
+        return 0;
+    }
+
+    NSUInteger size = ((NSUInteger)(bytes[6] & 0x7F) << 21) |
+                      ((NSUInteger)(bytes[7] & 0x7F) << 14) |
+                      ((NSUInteger)(bytes[8] & 0x7F) << 7) |
+                      (NSUInteger)(bytes[9] & 0x7F);
+    NSUInteger total = 10 + size;
+    if ((bytes[5] & 0x10) != 0) {
+        total += 10;
+    }
+    return MIN(total, fileData.length);
+}
+
+static NSUInteger SonoraID3v1TagLength(NSData *fileData) {
+    if (fileData.length < 128) {
+        return 0;
+    }
+
+    const uint8_t *bytes = fileData.bytes;
+    NSUInteger start = fileData.length - 128;
+    if (bytes[start] == 'T' && bytes[start + 1] == 'A' && bytes[start + 2] == 'G') {
+        return 128;
+    }
+    return 0;
+}
+
+static NSData *SonoraID3v23TextFrameData(NSString *frameIdentifier, NSString *value) {
+    NSString *trimmedValue = SonoraServicesTrimmedStringValue(value);
+    if (frameIdentifier.length != 4 || trimmedValue.length == 0) {
+        return nil;
+    }
+
+    NSMutableData *payload = [[NSMutableData alloc] init];
+    uint8_t encoding = 1;
+    [payload appendBytes:&encoding length:1];
+    [payload appendData:SonoraUTF16LEStringData(trimmedValue, NO)];
+    return SonoraID3v23FrameData(frameIdentifier, payload);
+}
+
+static NSData *SonoraID3v23AttachedPictureFrameData(UIImage *artwork) {
+    UIImage *squareArtwork = SonoraSquareArtworkImage(artwork);
+    if (squareArtwork == nil) {
+        return nil;
+    }
+
+    NSData *imageData = UIImageJPEGRepresentation(squareArtwork, 0.94);
+    NSString *mimeType = @"image/jpeg";
+    if (imageData.length == 0) {
+        imageData = UIImagePNGRepresentation(squareArtwork);
+        mimeType = @"image/png";
+    }
+    if (imageData.length == 0) {
+        return nil;
+    }
+
+    NSMutableData *payload = [[NSMutableData alloc] init];
+    uint8_t encoding = 0;
+    [payload appendBytes:&encoding length:1];
+    [payload appendData:[mimeType dataUsingEncoding:NSISOLatin1StringEncoding]];
+    uint8_t nullByte = 0;
+    [payload appendBytes:&nullByte length:1];
+    uint8_t pictureType = 3;
+    [payload appendBytes:&pictureType length:1];
+    [payload appendBytes:&nullByte length:1];
+    [payload appendData:imageData];
+    return SonoraID3v23FrameData(@"APIC", payload);
+}
+
+static NSData *SonoraID3v23FrameData(NSString *frameIdentifier, NSData *payload) {
+    if (frameIdentifier.length != 4 || payload.length == 0) {
+        return nil;
+    }
+
+    NSMutableData *frameData = [[NSMutableData alloc] initWithCapacity:(10 + payload.length)];
+    [frameData appendData:[frameIdentifier dataUsingEncoding:NSISOLatin1StringEncoding]];
+    uint32_t size = CFSwapInt32HostToBig((uint32_t)payload.length);
+    [frameData appendBytes:&size length:4];
+    uint16_t flags = 0;
+    [frameData appendBytes:&flags length:2];
+    [frameData appendData:payload];
+    return frameData;
+}
+
+static NSData *SonoraUTF16LEStringData(NSString *value, BOOL includeTerminator) {
+    NSMutableData *data = [[NSMutableData alloc] init];
+    const uint8_t bom[2] = { 0xFF, 0xFE };
+    [data appendBytes:bom length:sizeof(bom)];
+    NSData *stringData = [value dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
+    if (stringData.length > 0) {
+        [data appendData:stringData];
+    }
+    if (includeTerminator) {
+        const uint8_t terminator[2] = { 0x00, 0x00 };
+        [data appendBytes:terminator length:sizeof(terminator)];
+    }
+    return data;
+}
+
+static NSData *SonoraSyncSafeSizeData(NSUInteger size) {
+    uint8_t bytes[4];
+    bytes[0] = (uint8_t)((size >> 21) & 0x7F);
+    bytes[1] = (uint8_t)((size >> 14) & 0x7F);
+    bytes[2] = (uint8_t)((size >> 7) & 0x7F);
+    bytes[3] = (uint8_t)(size & 0x7F);
+    return [NSData dataWithBytes:bytes length:sizeof(bytes)];
 }
 static NSString * const kDiagnosticsDirectoryName = @"SonoraDiagnostics";
 static NSString * const kDiagnosticsLogFileName = @"runtime.log";
@@ -1450,25 +1610,41 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:fileURL options:nil];
-    AVAssetExportSession *exportSession = [[AVAssetExportSession alloc] initWithAsset:asset
-                                                                           presetName:AVAssetExportPresetPassthrough];
-    if (exportSession == nil || ![exportSession.supportedFileTypes containsObject:AVFileTypeMPEGLayer3]) {
-        finish(NO);
-        return;
-    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSData *sourceData = [NSData dataWithContentsOfURL:fileURL options:NSDataReadingMappedIfSafe error:nil];
+        if (sourceData.length == 0) {
+            finish(NO);
+            return;
+        }
 
-    NSString *temporaryFileName = [NSString stringWithFormat:@"%@.retag.%@",
-                                   fileURL.lastPathComponent.stringByDeletingPathExtension,
-                                   fileURL.pathExtension ?: @"mp3"];
-    NSURL *temporaryURL = [[fileURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:temporaryFileName];
-    [NSFileManager.defaultManager removeItemAtURL:temporaryURL error:nil];
+        NSUInteger id3v2Length = SonoraID3v2TagLength(sourceData);
+        NSUInteger id3v1Length = SonoraID3v1TagLength(sourceData);
+        if (sourceData.length <= id3v2Length + id3v1Length) {
+            finish(NO);
+            return;
+        }
 
-    exportSession.outputURL = temporaryURL;
-    exportSession.outputFileType = AVFileTypeMPEGLayer3;
-    exportSession.metadata = SonoraMergedID3Metadata(asset.metadata, resolvedTitle, resolvedArtist, resolvedArtwork);
-    [exportSession exportAsynchronouslyWithCompletionHandler:^{
-        if (exportSession.status != AVAssetExportSessionStatusCompleted) {
+        NSRange audioRange = NSMakeRange(id3v2Length, sourceData.length - id3v2Length - id3v1Length);
+        NSData *audioData = [sourceData subdataWithRange:audioRange];
+        NSData *tagData = SonoraID3v23TagData(resolvedTitle, resolvedArtist, resolvedArtwork);
+        if (tagData.length == 0) {
+            finish(NO);
+            return;
+        }
+
+        NSMutableData *rewrittenData = [[NSMutableData alloc] initWithCapacity:(tagData.length + audioData.length)];
+        [rewrittenData appendData:tagData];
+        [rewrittenData appendData:audioData];
+
+        NSString *temporaryFileName = [NSString stringWithFormat:@"%@.retag.%@",
+                                       fileURL.lastPathComponent.stringByDeletingPathExtension,
+                                       fileURL.pathExtension ?: @"mp3"];
+        NSURL *temporaryURL = [[fileURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:temporaryFileName];
+        [NSFileManager.defaultManager removeItemAtURL:temporaryURL error:nil];
+
+        NSError *writeError = nil;
+        BOOL wrote = [rewrittenData writeToURL:temporaryURL options:NSDataWritingAtomic error:&writeError];
+        if (!wrote || writeError != nil) {
             [NSFileManager.defaultManager removeItemAtURL:temporaryURL error:nil];
             finish(NO);
             return;
@@ -1489,7 +1665,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         }
 
         finish(YES);
-    }];
+    });
 }
 
 - (NSString *)metadataStringForCommonKey:(AVMetadataKey)key asset:(AVAsset *)asset {
