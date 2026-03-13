@@ -52,6 +52,33 @@ static NSString *SonoraServicesTrimmedStringValue(id value) {
     return trimmed ?: @"";
 }
 
+static NSString *SonoraServicesRemovingYouTubeTopicSuffix(NSString *value) {
+    NSString *trimmed = SonoraServicesTrimmedStringValue(value);
+    if (trimmed.length == 0) {
+        return @"";
+    }
+
+    NSArray<NSString *> *suffixes = @[@" - Topic", @" – Topic", @" — Topic"];
+    NSString *lowercased = trimmed.lowercaseString;
+    for (NSString *suffix in suffixes) {
+        NSString *lowercasedSuffix = suffix.lowercaseString;
+        if ([lowercased hasSuffix:lowercasedSuffix] && trimmed.length > suffix.length) {
+            NSString *stripped = [trimmed substringToIndex:(trimmed.length - suffix.length)];
+            return SonoraServicesTrimmedStringValue(stripped);
+        }
+    }
+
+    return trimmed;
+}
+
+static NSString *SonoraServicesNormalizedDownloadedTrackTitle(id value) {
+    return SonoraServicesTrimmedStringValue(value);
+}
+
+static NSString *SonoraServicesNormalizedDownloadedTrackArtist(id value) {
+    return SonoraServicesRemovingYouTubeTopicSuffix(SonoraServicesTrimmedStringValue(value));
+}
+
 static UIImage *SonoraSquareArtworkImage(UIImage *image);
 
 static AVMutableMetadataItem *SonoraID3StringMetadataItem(AVMetadataIdentifier identifier, NSString *value) {
@@ -97,6 +124,7 @@ static NSArray<AVMetadataItem *> *SonoraMergedID3Metadata(NSArray<AVMetadataItem
     NSSet<AVMetadataIdentifier> *replacedIdentifiers = [NSSet setWithArray:@[
         AVMetadataIdentifierID3MetadataTitleDescription,
         AVMetadataIdentifierID3MetadataLeadPerformer,
+        AVMetadataIdentifierID3MetadataBand,
         AVMetadataIdentifierID3MetadataAttachedPicture
     ]];
 
@@ -115,6 +143,11 @@ static NSArray<AVMetadataItem *> *SonoraMergedID3Metadata(NSArray<AVMetadataItem
     AVMutableMetadataItem *artistItem = SonoraID3StringMetadataItem(AVMetadataIdentifierID3MetadataLeadPerformer, artist);
     if (artistItem != nil) {
         [merged addObject:artistItem];
+    }
+
+    AVMutableMetadataItem *albumArtistItem = SonoraID3StringMetadataItem(AVMetadataIdentifierID3MetadataBand, artist);
+    if (albumArtistItem != nil) {
+        [merged addObject:albumArtistItem];
     }
 
     AVMutableMetadataItem *artworkItem = SonoraID3ArtworkMetadataItem(artwork);
@@ -1339,12 +1372,12 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return nil;
     }
 
-    NSString *resolvedTitle = SonoraServicesTrimmedStringValue(preferredTitle);
+    NSString *resolvedTitle = SonoraServicesNormalizedDownloadedTrackTitle(preferredTitle);
     if (resolvedTitle.length > 0) {
         track.title = resolvedTitle;
     }
 
-    NSString *resolvedArtist = SonoraServicesTrimmedStringValue(preferredArtist);
+    NSString *resolvedArtist = SonoraServicesNormalizedDownloadedTrackArtist(preferredArtist);
     if (resolvedArtist.length > 0) {
         track.artist = resolvedArtist;
     }
@@ -1353,7 +1386,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         track.duration = preferredDuration;
     }
 
-    UIImage *artworkToStore = preferredArtwork ?: embeddedArtwork;
+    UIImage *artworkToStore = SonoraSquareArtworkImage(preferredArtwork ?: embeddedArtwork);
     if (artworkToStore != nil) {
         track.artwork = artworkToStore;
     }
@@ -1399,9 +1432,10 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
         return;
     }
 
-    NSString *resolvedTitle = SonoraServicesTrimmedStringValue(preferredTitle);
-    NSString *resolvedArtist = SonoraServicesTrimmedStringValue(preferredArtist);
-    if (resolvedTitle.length == 0 && resolvedArtist.length == 0 && preferredArtwork == nil) {
+    NSString *resolvedTitle = SonoraServicesNormalizedDownloadedTrackTitle(preferredTitle);
+    NSString *resolvedArtist = SonoraServicesNormalizedDownloadedTrackArtist(preferredArtist);
+    UIImage *resolvedArtwork = SonoraSquareArtworkImage(preferredArtwork);
+    if (resolvedTitle.length == 0 && resolvedArtist.length == 0 && resolvedArtwork == nil) {
         finish(NO);
         return;
     }
@@ -1422,7 +1456,7 @@ static NSData *SonoraEncodedCoverData(UIImage *image) {
 
     exportSession.outputURL = temporaryURL;
     exportSession.outputFileType = AVFileTypeMPEGLayer3;
-    exportSession.metadata = SonoraMergedID3Metadata(asset.metadata, resolvedTitle, resolvedArtist, preferredArtwork);
+    exportSession.metadata = SonoraMergedID3Metadata(asset.metadata, resolvedTitle, resolvedArtist, resolvedArtwork);
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
         if (exportSession.status != AVAssetExportSessionStatusCompleted) {
             [NSFileManager.defaultManager removeItemAtURL:temporaryURL error:nil];
