@@ -52,6 +52,8 @@ static NSString *SonoraServicesTrimmedStringValue(id value) {
     return trimmed ?: @"";
 }
 
+static UIImage *SonoraSquareArtworkImage(UIImage *image);
+
 static AVMutableMetadataItem *SonoraID3StringMetadataItem(AVMetadataIdentifier identifier, NSString *value) {
     NSString *trimmedValue = SonoraServicesTrimmedStringValue(value);
     if (trimmedValue.length == 0) {
@@ -69,10 +71,11 @@ static AVMutableMetadataItem *SonoraID3ArtworkMetadataItem(UIImage *artwork) {
         return nil;
     }
 
-    NSData *imageData = UIImageJPEGRepresentation(artwork, 0.94);
+    UIImage *squareArtwork = SonoraSquareArtworkImage(artwork);
+    NSData *imageData = UIImageJPEGRepresentation(squareArtwork, 0.94);
     NSString *dataType = (__bridge NSString *)kCMMetadataBaseDataType_JPEG;
     if (imageData.length == 0) {
-        imageData = UIImagePNGRepresentation(artwork);
+        imageData = UIImagePNGRepresentation(squareArtwork);
         dataType = (__bridge NSString *)kCMMetadataBaseDataType_PNG;
     }
     if (imageData.length == 0) {
