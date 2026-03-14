@@ -7,6 +7,7 @@
 
 #import "AppDelegate.h"
 #import <AVFoundation/AVFoundation.h>
+#import "SonoraWidgetBridge.h"
 
 @interface AppDelegate ()
 
@@ -35,6 +36,11 @@
     if (sessionError != nil) {
         NSLog(@"Audio session activation error: %@", sessionError.localizedDescription);
     }
+
+    // Sync tracks data with widget early on launch
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [SonoraWidgetBridge refreshSharedLovelyTracks];
+    });
 
     return YES;
 }
