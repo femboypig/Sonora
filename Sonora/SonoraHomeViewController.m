@@ -308,7 +308,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
     titleLabel.font = SonoraNotoSerifBoldFont(30.0);
     titleLabel.textColor = UIColor.labelColor;
     titleLabel.numberOfLines = 1;
-    titleLabel.text = @"My wave";
+    titleLabel.text = @"";
     self.titleLabel = titleLabel;
 
     UIButton *playButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -376,7 +376,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
 
 - (void)prepareForReuse {
     [super prepareForReuse];
-    self.titleLabel.text = @"My wave";
+    self.titleLabel.text = @"";
     self.playHandler = nil;
     self.playing = NO;
     self.configuredTrackIdentifier = nil;
@@ -395,6 +395,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
 - (void)configureWithTrack:(SonoraTrack *)track {
     self.configuredTrackIdentifier = track.identifier ?: @"";
     NSArray<UIColor *> *palette = SonoraResolvedWavePalette(track.artwork);
+    self.titleLabel.text = SonoraDisplayTrackTitle(track);
     [self updateThemeColors];
     [self updateWaveLookAnimated:NO];
     if (SonoraCurrentMyWaveLook() == SonoraMyWaveLookClouds) {
@@ -1478,11 +1479,20 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
         return NO;
     }
 
+    NSUInteger minimumWaveMatches = MIN((NSUInteger)3, self.recommendationTracks.count);
+    if (queue.count < minimumWaveMatches) {
+        return NO;
+    }
+
     NSUInteger matched = 0;
     for (SonoraTrack *track in queue) {
         if (track.identifier.length > 0 && [waveIDs containsObject:track.identifier]) {
             matched += 1;
         }
+    }
+
+    if (matched < minimumWaveMatches) {
+        return NO;
     }
 
     double ratio = (double)matched / (double)MAX((NSUInteger)1, queue.count);
