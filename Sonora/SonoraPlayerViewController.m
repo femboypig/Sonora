@@ -15,6 +15,7 @@
 
 static NSString * const SonoraMiniStreamingPlaceholderPrefix = @"mini-streaming-placeholder-";
 static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylists.v1";
+NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
 
 #pragma mark - Player
 
@@ -120,6 +121,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 
 @property (nonatomic, strong) UIImageView *artworkView;
 @property (nonatomic, strong) UIView *backgroundColorView;
+@property (nonatomic, strong) CAGradientLayer *backgroundGradientLayer;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UISlider *progressSlider;
@@ -225,6 +227,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
     [super viewDidLayoutSubviews];
     [self updateArtworkCornerRadius];
     [self updateControlsBottomInset];
+    self.backgroundGradientLayer.frame = self.backgroundColorView.bounds;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -236,6 +239,12 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
     UIView *backgroundColorView = [[UIView alloc] init];
     backgroundColorView.translatesAutoresizingMaskIntoConstraints = NO;
     self.backgroundColorView = backgroundColorView;
+    CAGradientLayer *backgroundGradientLayer = [CAGradientLayer layer];
+    backgroundGradientLayer.startPoint = CGPointMake(0.15, 0.0);
+    backgroundGradientLayer.endPoint = CGPointMake(0.85, 1.0);
+    backgroundGradientLayer.locations = @[@0.0, @0.36, @0.72, @1.0];
+    [backgroundColorView.layer addSublayer:backgroundGradientLayer];
+    self.backgroundGradientLayer = backgroundGradientLayer;
 
     UIView *content = [[UIView alloc] init];
     content.translatesAutoresizingMaskIntoConstraints = NO;
@@ -491,6 +500,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 
     self.view.backgroundColor = resolvedBackground;
     self.backgroundColorView.backgroundColor = resolvedBackground;
+    self.backgroundGradientLayer.hidden = !(SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() && self.backgroundGradientLayer.colors.count > 0);
     [self updateArtworkCornerRadius];
     self.titleLabel.textColor = primary;
     self.subtitleLabel.textColor = secondary;
@@ -562,17 +572,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 - (void)updateArtworkBasedBackgroundForTrack:(SonoraTrack * _Nullable)track {
     if (!SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() || track.artwork == nil) {
         self.currentArtworkBackgroundColor = nil;
-        return;
-    }
-
-    UIColor *dominant = [SonoraArtworkAccentColorService dominantAccentColorForImage:track.artwork
-                                                                             fallback:SonoraPlayerBackgroundColor()];
-    CGFloat red = 0.0;
-    CGFloat green = 0.0;
-    CGFloat blue = 0.0;
-    CGFloat alpha = 1.0;
-    if (![dominant getRed:&red green:&green blue:&blue alpha:&alpha]) {
-        self.currentArtworkBackgroundColor = SonoraPlayerBackgroundColor();
+        self.backgroundGradientLayer.colors = nil;
         return;
     }
 
@@ -584,11 +584,34 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
     [base getRed:&baseRed green:&baseGreen blue:&baseBlue alpha:&baseAlpha];
 
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    CGFloat mix = isDark ? 0.28 : 0.18;
-    self.currentArtworkBackgroundColor = [UIColor colorWithRed:(baseRed + ((red - baseRed) * mix))
-                                                         green:(baseGreen + ((green - baseGreen) * mix))
-                                                          blue:(baseBlue + ((blue - baseBlue) * mix))
-                                                         alpha:1.0];
+    NSArray<UIColor *> *palette = SonoraResolvedWavePalette(track.artwork);
+    if (palette.count == 0) {
+        palette = @[[SonoraArtworkAccentColorService dominantAccentColorForImage:track.artwork fallback:base]];
+    }
+
+    NSMutableArray *gradientColors = [NSMutableArray arrayWithCapacity:4];
+    NSArray<NSNumber *> *mixes = isDark ? @[@0.34, @0.28, @0.22, @0.18] : @[@0.22, @0.18, @0.14, @0.10];
+    for (NSUInteger idx = 0; idx < 4; idx += 1) {
+        UIColor *paletteColor = palette[idx % palette.count];
+        CGFloat red = 0.0;
+        CGFloat green = 0.0;
+        CGFloat blue = 0.0;
+        CGFloat alpha = 1.0;
+        if (![paletteColor getRed:&red green:&green blue:&blue alpha:&alpha]) {
+            continue;
+        }
+        CGFloat mix = [mixes[idx] doubleValue];
+        UIColor *blended = [UIColor colorWithRed:(baseRed + ((red - baseRed) * mix))
+                                           green:(baseGreen + ((green - baseGreen) * mix))
+                                            blue:(baseBlue + ((blue - baseBlue) * mix))
+                                           alpha:1.0];
+        [gradientColors addObject:(id)blended.CGColor];
+        if (idx == 0) {
+            self.currentArtworkBackgroundColor = blended;
+        }
+    }
+
+    self.backgroundGradientLayer.colors = gradientColors;
 }
 
 - (void)updateArtworkCornerRadius {
