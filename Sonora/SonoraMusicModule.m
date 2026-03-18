@@ -1927,6 +1927,9 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
     if (self.musicOnlyMode) {
         return;
     }
+    if (!SonoraSettingsAutoSaveStreamingSongsEnabled()) {
+        return;
+    }
 
     SonoraTrack *currentTrack = SonoraPlaybackManager.sharedManager.currentTrack;
     if (![self isMiniStreamingPlaceholderTrack:currentTrack]) {
@@ -2397,6 +2400,9 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
 - (void)startMiniStreamingInstallIfNeededForTrack:(SonoraMiniStreamingTrack *)track
                                        showErrorUI:(BOOL)showErrorUI {
     if (track == nil || track.trackID.length == 0) {
+        return;
+    }
+    if (!showErrorUI && !SonoraSettingsAutoSaveStreamingSongsEnabled()) {
         return;
     }
 
