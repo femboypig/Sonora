@@ -305,9 +305,11 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    titleLabel.font = SonoraNotoSerifBoldFont(30.0);
+    titleLabel.font = SonoraNotoSerifBoldFont(28.0);
     titleLabel.textColor = UIColor.labelColor;
-    titleLabel.numberOfLines = 1;
+    titleLabel.numberOfLines = 2;
+    titleLabel.textAlignment = NSTextAlignmentCenter;
+    titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
     titleLabel.text = @"";
     self.titleLabel = titleLabel;
 
@@ -360,7 +362,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
         [contourWaveBackgroundView.bottomAnchor constraintEqualToAnchor:waveBackgroundContainer.bottomAnchor],
 
         [titleLabel.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor],
-        [titleLabel.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor constant:-16.0],
+        [titleLabel.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor constant:-22.0],
         [titleLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.contentView.leadingAnchor constant:18.0],
         [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-18.0],
 
