@@ -119,6 +119,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 @interface SonoraPlayerViewController ()
 
 @property (nonatomic, strong) UIImageView *artworkView;
+@property (nonatomic, strong) UIView *backgroundColorView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UISlider *progressSlider;
@@ -137,6 +138,8 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 @property (nonatomic, strong) UIActivityIndicatorView *artworkLoadingSpinner;
 @property (nonatomic, strong) NSLayoutConstraint *artworkLeadingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *artworkTrailingConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *controlsBottomConstraint;
+@property (nonatomic, strong, nullable) UIColor *currentArtworkBackgroundColor;
 @property (nonatomic, assign) BOOL scrubbing;
 
 @end
@@ -221,6 +224,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self updateArtworkCornerRadius];
+    [self updateControlsBottomInset];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -229,6 +233,10 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 }
 
 - (void)setupUI {
+    UIView *backgroundColorView = [[UIView alloc] init];
+    backgroundColorView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.backgroundColorView = backgroundColorView;
+
     UIView *content = [[UIView alloc] init];
     content.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -392,6 +400,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
     [controlsRow addSubview:transportStack];
     [controlsRow addSubview:rightStack];
 
+    [self.view addSubview:backgroundColorView];
     [self.view addSubview:content];
 
     NSLayoutConstraint *artworkSquare = [artworkView.heightAnchor constraintEqualToAnchor:artworkView.widthAnchor];
@@ -400,7 +409,13 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
     self.artworkTrailingConstraint = [artworkView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    self.controlsBottomConstraint = [controlsRow.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-6.0];
     [NSLayoutConstraint activateConstraints:@[
+        [backgroundColorView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [backgroundColorView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [backgroundColorView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [backgroundColorView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
         [content.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [content.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [content.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
@@ -442,7 +457,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 
         [controlsRow.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
         [controlsRow.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14.0],
-        [controlsRow.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-6.0],
+        self.controlsBottomConstraint,
         [controlsRow.heightAnchor constraintEqualToConstant:88.0],
 
         [modeStack.leadingAnchor constraintEqualToAnchor:controlsRow.leadingAnchor],
@@ -469,8 +484,13 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
     UIColor *primary = SonoraPlayerPrimaryColor();
     UIColor *secondary = SonoraPlayerSecondaryColor();
     SonoraPlayerFontStyle fontStyle = SonoraPlayerFontStyleFromDefaults();
+    UIColor *resolvedBackground = SonoraPlayerBackgroundColor();
+    if (SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() && self.currentArtworkBackgroundColor != nil) {
+        resolvedBackground = self.currentArtworkBackgroundColor;
+    }
 
-    self.view.backgroundColor = SonoraPlayerBackgroundColor();
+    self.view.backgroundColor = resolvedBackground;
+    self.backgroundColorView.backgroundColor = resolvedBackground;
     [self updateArtworkCornerRadius];
     self.titleLabel.textColor = primary;
     self.subtitleLabel.textColor = secondary;
@@ -526,6 +546,51 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
     [self updateEqualizerBadge];
 }
 
+- (void)updateControlsBottomInset {
+    CGFloat maxDimension = MAX(CGRectGetWidth(self.view.bounds), CGRectGetHeight(self.view.bounds));
+    CGFloat bottomInset = 6.0;
+    if (maxDimension >= 926.0) {
+        bottomInset = 18.0;
+    } else if (maxDimension >= 852.0) {
+        bottomInset = 14.0;
+    } else if (maxDimension >= 812.0) {
+        bottomInset = 10.0;
+    }
+    self.controlsBottomConstraint.constant = -bottomInset;
+}
+
+- (void)updateArtworkBasedBackgroundForTrack:(SonoraTrack * _Nullable)track {
+    if (!SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() || track.artwork == nil) {
+        self.currentArtworkBackgroundColor = nil;
+        return;
+    }
+
+    UIColor *dominant = [SonoraArtworkAccentColorService dominantAccentColorForImage:track.artwork
+                                                                             fallback:SonoraPlayerBackgroundColor()];
+    CGFloat red = 0.0;
+    CGFloat green = 0.0;
+    CGFloat blue = 0.0;
+    CGFloat alpha = 1.0;
+    if (![dominant getRed:&red green:&green blue:&blue alpha:&alpha]) {
+        self.currentArtworkBackgroundColor = SonoraPlayerBackgroundColor();
+        return;
+    }
+
+    UIColor *base = SonoraPlayerBackgroundColor();
+    CGFloat baseRed = 0.0;
+    CGFloat baseGreen = 0.0;
+    CGFloat baseBlue = 0.0;
+    CGFloat baseAlpha = 1.0;
+    [base getRed:&baseRed green:&baseGreen blue:&baseBlue alpha:&baseAlpha];
+
+    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    CGFloat mix = isDark ? 0.28 : 0.18;
+    self.currentArtworkBackgroundColor = [UIColor colorWithRed:(baseRed + ((red - baseRed) * mix))
+                                                         green:(baseGreen + ((green - baseGreen) * mix))
+                                                          blue:(baseBlue + ((blue - baseBlue) * mix))
+                                                         alpha:1.0];
+}
+
 - (void)updateArtworkCornerRadius {
     SonoraPlayerArtworkStyle artworkStyle = SonoraPlayerArtworkStyleFromDefaults();
     CGFloat horizontalInset = (artworkStyle == SonoraPlayerArtworkStyleRounded) ? 12.0 : 0.0;
@@ -548,6 +613,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 
 - (void)handlePlayerSettingsChanged:(NSNotification *)notification {
     (void)notification;
+    [self updateArtworkBasedBackgroundForTrack:SonoraPlaybackManager.sharedManager.currentTrack];
     [self applyPlayerTheme];
     [self updateEqualizerBadge];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
@@ -749,6 +815,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
         self.artworkView.image = [UIImage systemImageNamed:@"music.note.list"];
         self.artworkView.contentMode = UIViewContentModeCenter;
         self.artworkView.tintColor = SonoraPlayerPrimaryColor();
+        self.currentArtworkBackgroundColor = nil;
         [self updateArtworkLoadingOverlayForTrack:nil];
 
         self.subtitleLabel.text = @"";
@@ -774,6 +841,7 @@ static NSString * const SonoraSharedPlaylistDefaultsKey = @"sonora.sharedPlaylis
 
     self.artworkView.contentMode = UIViewContentModeScaleAspectFill;
     self.artworkView.image = track.artwork;
+    [self updateArtworkBasedBackgroundForTrack:track];
     [self updateArtworkLoadingOverlayForTrack:track];
 
     self.subtitleLabel.text = (track.artist.length > 0 ? track.artist : @"");

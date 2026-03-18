@@ -79,6 +79,8 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 @property (nonatomic, strong) UISegmentedControl *fontControl;
 @property (nonatomic, strong) UISegmentedControl *artworkStyleControl;
 @property (nonatomic, strong) UISegmentedControl *myWaveLookControl;
+@property (nonatomic, strong) UISwitch *playerArtworkBackgroundSwitch;
+@property (nonatomic, strong) UISwitch *autoSaveStreamingSongsSwitch;
 @property (nonatomic, strong) UISwitch *artworkEqualizerSwitch;
 @property (nonatomic, strong) UISwitch *preservePlayerModesSwitch;
 @property (nonatomic, strong) UISwitch *onlinePlaylistCacheTracksSwitch;
@@ -174,6 +176,13 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
                                                               subtitle:@"Previous clouds or contour rings on Home"
                                                                control:myWaveLookControl]];
 
+    UISwitch *playerArtworkBackgroundSwitch = [[UISwitch alloc] init];
+    [playerArtworkBackgroundSwitch addTarget:self action:@selector(playerArtworkBackgroundChanged:) forControlEvents:UIControlEventValueChanged];
+    self.playerArtworkBackgroundSwitch = playerArtworkBackgroundSwitch;
+    [customizationStack addArrangedSubview:[self switchRowWithTitle:@"Player background from artwork"
+                                                           subtitle:@"Use the dominant cover color behind the player"
+                                                            control:playerArtworkBackgroundSwitch]];
+
     UILabel *accentColorValue = [self valueLabel];
     self.accentColorValueLabel = accentColorValue;
     [customizationStack addArrangedSubview:[self selectableValueRowWithTitle:@"Accent color"
@@ -227,6 +236,13 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     [memoryStack addArrangedSubview:[self switchRowWithTitle:@"Preserve player settings"
                                                     subtitle:@"Keep shuffle/repeat after app restart"
                                                      control:preservePlayerModesSwitch]];
+
+    UISwitch *autoSaveStreamingSongsSwitch = [[UISwitch alloc] init];
+    [autoSaveStreamingSongsSwitch addTarget:self action:@selector(autoSaveStreamingSongsChanged:) forControlEvents:UIControlEventValueChanged];
+    self.autoSaveStreamingSongsSwitch = autoSaveStreamingSongsSwitch;
+    [memoryStack addArrangedSubview:[self switchRowWithTitle:@"Auto-save streaming songs"
+                                                    subtitle:@"Save online songs to the library while they play"
+                                                     control:autoSaveStreamingSongsSwitch]];
 
     [contentStack addArrangedSubview:[self sectionHeadingWithText:@"Cache"]];
     UIStackView *cacheStack = [self addSectionCardToStack:contentStack];
@@ -533,6 +549,8 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     NSInteger artworkStyle = SonoraSettingsArtworkStyleIndex();
     NSInteger myWaveLook = SonoraSettingsMyWaveLook();
     SonoraStreamingSearchEngine streamingSearchEngine = SonoraSettingsStreamingSearchEngine();
+    BOOL useArtworkBasedPlayerBackground = SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled();
+    BOOL autoSaveStreamingSongs = SonoraSettingsAutoSaveStreamingSongsEnabled();
     BOOL artworkEqualizerEnabled = SonoraSettingsArtworkEqualizerEnabled();
     BOOL preserveModes = SonoraSettingsPreservePlayerModesEnabled();
     double trackGap = SonoraSettingsTrackGapSeconds();
@@ -556,6 +574,8 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     self.fontControl.selectedSegmentIndex = MAX(0, MIN(1, font));
     self.artworkStyleControl.selectedSegmentIndex = MAX(0, MIN(1, artworkStyle));
     self.myWaveLookControl.selectedSegmentIndex = myWaveLook;
+    self.playerArtworkBackgroundSwitch.on = useArtworkBasedPlayerBackground;
+    self.autoSaveStreamingSongsSwitch.on = autoSaveStreamingSongs;
     self.artworkEqualizerSwitch.on = artworkEqualizerEnabled;
     self.preservePlayerModesSwitch.on = preserveModes;
     self.onlinePlaylistCacheTracksSwitch.on = cacheOnlinePlaylistTracks;
@@ -587,6 +607,16 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 - (void)myWaveLookChanged:(UISegmentedControl *)sender {
     NSInteger look = MAX((NSInteger)SonoraMyWaveLookClouds, MIN((NSInteger)SonoraMyWaveLookContours, sender.selectedSegmentIndex));
     SonoraSettingsSetMyWaveLook(look);
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)playerArtworkBackgroundChanged:(UISwitch *)sender {
+    SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(sender.isOn);
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)autoSaveStreamingSongsChanged:(UISwitch *)sender {
+    SonoraSettingsSetAutoSaveStreamingSongsEnabled(sender.isOn);
     [self notifyPlayerSettingsChanged];
 }
 
@@ -1163,6 +1193,8 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         @"fontStyle": (SonoraSettingsFontStyleIndex() == 1 ? @"serif" : @"system"),
         @"artworkStyle": (SonoraSettingsArtworkStyleIndex() == 0 ? @"square" : @"rounded"),
         @"streamingSearchEngine": (SonoraSettingsStreamingSearchEngine() == SonoraStreamingSearchEngineYouTube ? @"youtube" : @"spotify"),
+        @"useArtworkBasedPlayerBackground": @(SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled()),
+        @"autoSaveStreamingSongs": @(SonoraSettingsAutoSaveStreamingSongsEnabled()),
         @"accentHex": [self hexStringForColor:[self currentAccentColor]],
         @"preservePlayerModes": @(SonoraSettingsPreservePlayerModesEnabled()),
         @"trackGapSeconds": @(SonoraSettingsTrackGapSeconds()),
@@ -1207,6 +1239,16 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
             : SonoraStreamingSearchEngineSpotify;
     }
     SonoraSettingsSetStreamingSearchEngine(engine);
+
+    id artworkBackgroundValue = settings[@"useArtworkBasedPlayerBackground"];
+    if ([artworkBackgroundValue respondsToSelector:@selector(boolValue)]) {
+        SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled([artworkBackgroundValue boolValue]);
+    }
+
+    id autoSaveStreamingSongsValue = settings[@"autoSaveStreamingSongs"];
+    if ([autoSaveStreamingSongsValue respondsToSelector:@selector(boolValue)]) {
+        SonoraSettingsSetAutoSaveStreamingSongsEnabled([autoSaveStreamingSongsValue boolValue]);
+    }
 
     id accentValue = settings[@"accentHex"];
     if ([accentValue isKindOfClass:NSString.class] && ((NSString *)accentValue).length > 0) {

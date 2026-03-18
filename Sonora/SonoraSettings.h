@@ -28,6 +28,12 @@ FOUNDATION_EXTERN void SonoraSettingsSetMyWaveLook(SonoraMyWaveLook value);
 FOUNDATION_EXTERN SonoraStreamingSearchEngine SonoraSettingsStreamingSearchEngine(void);
 FOUNDATION_EXTERN void SonoraSettingsSetStreamingSearchEngine(SonoraStreamingSearchEngine value);
 
+FOUNDATION_EXTERN BOOL SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled(void);
+FOUNDATION_EXTERN void SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(BOOL enabled);
+
+FOUNDATION_EXTERN BOOL SonoraSettingsAutoSaveStreamingSongsEnabled(void);
+FOUNDATION_EXTERN void SonoraSettingsSetAutoSaveStreamingSongsEnabled(BOOL enabled);
+
 FOUNDATION_EXTERN BOOL SonoraSettingsArtworkEqualizerEnabled(void);
 FOUNDATION_EXTERN void SonoraSettingsSetArtworkEqualizerEnabled(BOOL enabled);
 

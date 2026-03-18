@@ -2422,7 +2422,8 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
             [self playMiniStreamingPlaybackQueueIfCurrentForTrack:track];
         }
         NSURL *cachedDownloadURL = [self miniStreamingDownloadURLFromPayload:cachedPayload];
-        if (cachedDownloadURL != nil) {
+        if (cachedDownloadURL != nil &&
+            (showErrorUI || SonoraSettingsAutoSaveStreamingSongsEnabled())) {
             [self scheduleMiniStreamingBackgroundDownloadFromURL:cachedDownloadURL
                                                          payload:cachedPayload
                                                          trackID:track.trackID];
@@ -2498,9 +2499,11 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
         if (shouldStartPlayback) {
             [strongSelf playMiniStreamingPlaybackQueueIfCurrentForTrack:track];
         }
-        [strongSelf scheduleMiniStreamingBackgroundDownloadFromURL:downloadURL
-                                                           payload:payload
-                                                           trackID:track.trackID];
+        if (showErrorUI || SonoraSettingsAutoSaveStreamingSongsEnabled()) {
+            [strongSelf scheduleMiniStreamingBackgroundDownloadFromURL:downloadURL
+                                                               payload:payload
+                                                               trackID:track.trackID];
+        }
     }];
 }
 

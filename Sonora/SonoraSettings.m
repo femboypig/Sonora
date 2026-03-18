@@ -12,6 +12,8 @@ static NSString * const SonoraSettingsPreservePlayerModesKey = @"sonora.settings
 static NSString * const SonoraSettingsTrackGapKey = @"sonora.settings.trackGapSeconds";
 static NSString * const SonoraSettingsMyWaveLookKey = @"sonora.settings.myWaveLook";
 static NSString * const SonoraSettingsStreamingSearchEngineKey = @"sonora.settings.streamingSearchEngine";
+static NSString * const SonoraSettingsArtworkBasedPlayerBackgroundKey = @"sonora.settings.useArtworkBasedPlayerBackground";
+static NSString * const SonoraSettingsAutoSaveStreamingSongsKey = @"sonora.settings.autoSaveStreamingSongs";
 
 static NSUserDefaults *SonoraSettingsDefaults(void) {
     return NSUserDefaults.standardUserDefaults;
@@ -84,6 +86,30 @@ void SonoraSettingsSetStreamingSearchEngine(SonoraStreamingSearchEngine value) {
         ? SonoraStreamingSearchEngineYouTube
         : SonoraStreamingSearchEngineSpotify;
     [SonoraSettingsDefaults() setInteger:rawValue forKey:SonoraSettingsStreamingSearchEngineKey];
+}
+
+BOOL SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled(void) {
+    NSUserDefaults *defaults = SonoraSettingsDefaults();
+    if ([defaults objectForKey:SonoraSettingsArtworkBasedPlayerBackgroundKey] == nil) {
+        return YES;
+    }
+    return [defaults boolForKey:SonoraSettingsArtworkBasedPlayerBackgroundKey];
+}
+
+void SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(BOOL enabled) {
+    [SonoraSettingsDefaults() setBool:enabled forKey:SonoraSettingsArtworkBasedPlayerBackgroundKey];
+}
+
+BOOL SonoraSettingsAutoSaveStreamingSongsEnabled(void) {
+    NSUserDefaults *defaults = SonoraSettingsDefaults();
+    if ([defaults objectForKey:SonoraSettingsAutoSaveStreamingSongsKey] == nil) {
+        return YES;
+    }
+    return [defaults boolForKey:SonoraSettingsAutoSaveStreamingSongsKey];
+}
+
+void SonoraSettingsSetAutoSaveStreamingSongsEnabled(BOOL enabled) {
+    [SonoraSettingsDefaults() setBool:enabled forKey:SonoraSettingsAutoSaveStreamingSongsKey];
 }
 
 BOOL SonoraSettingsArtworkEqualizerEnabled(void) {
