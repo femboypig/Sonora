@@ -761,6 +761,9 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
         return;
     }
 
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    collectionView.backgroundColor = SonoraAppBackgroundColor();
+
     if (self.recommendationTracks.count > 0) {
         [self refreshVisibleWaveCellIfNeededPreservingWaveProgress:YES];
     } else {

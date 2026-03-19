@@ -116,6 +116,8 @@ static UIViewController * _Nullable SonoraInstantiatePlayerFromHistory(void) {
 }
 
 - (void)handlePlaybackChanged {
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    self.tableView.backgroundColor = SonoraAppBackgroundColor();
     [self.tableView reloadData];
 }
 

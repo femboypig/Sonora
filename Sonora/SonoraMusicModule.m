@@ -785,6 +785,8 @@ typedef void (^SonoraMiniStreamingInstallHandler)(SonoraMiniStreamingTrack *trac
 }
 
 - (void)handlePlaybackChanged {
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    self.tableView.backgroundColor = SonoraAppBackgroundColor();
     [self.tableView reloadData];
     [self updatePlayButtonState];
     [self updateSleepButton];
@@ -1481,6 +1483,8 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
     }
     self.miniStreamingCurrentPlaybackTrackID = nextMiniTrackID.length > 0 ? nextMiniTrackID : nil;
 
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    self.tableView.backgroundColor = SonoraAppBackgroundColor();
     [self schedulePlaybackStateSurfaceRefresh];
 }
 
@@ -3995,6 +3999,8 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 }
 
 - (void)handlePlaybackChanged {
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    self.tableView.backgroundColor = SonoraAppBackgroundColor();
     [self.tableView reloadData];
 }
 
@@ -5029,6 +5035,8 @@ leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 }
 
 - (void)handlePlaybackChanged {
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    self.tableView.backgroundColor = SonoraAppBackgroundColor();
     [self updatePlayButtonState];
     [self.tableView reloadData];
 }

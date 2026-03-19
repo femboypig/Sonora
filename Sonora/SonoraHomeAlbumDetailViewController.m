@@ -330,6 +330,8 @@ static UIColor *SonoraHomeAlbumDetailAccentColor(void) {
 }
 
 - (void)handlePlaybackChanged {
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    self.tableView.backgroundColor = SonoraAppBackgroundColor();
     [self updatePlayButtonState];
     [self.tableView reloadData];
 }
