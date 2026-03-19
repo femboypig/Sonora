@@ -396,6 +396,12 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
 }
 
 - (void)handlePlaybackStateChanged {
+    if (SonoraSettingsAppBackgroundMode() == SonoraAppBackgroundModeArtwork) {
+        [self setupAppearance];
+        self.view.backgroundColor = SonoraAppBackgroundColor();
+        self.miniPlayerContainer.backgroundColor = SonoraMiniPlayerBackgroundColor();
+        self.miniPlayerContainer.layer.borderColor = SonoraMiniPlayerBorderColor().CGColor;
+    }
     [self updateMiniPlayer];
 }
 

@@ -101,6 +101,30 @@ static UIColor *SonoraColorFromHexString(NSString *hexString) {
     return [UIColor colorWithRed:red green:green blue:blue alpha:1.0];
 }
 
+static UIColor * _Nullable SonoraCurrentArtworkAppBackgroundSourceColor(UITraitCollection *trait) {
+    SonoraTrack *track = SonoraPlaybackManager.sharedManager.currentTrack;
+    UIImage *artwork = track.artwork;
+    if (artwork == nil) {
+        return nil;
+    }
+
+    NSArray<UIColor *> *palette = SonoraResolvedWavePalette(artwork);
+    UIColor *candidate = nil;
+    if (palette.count >= 4) {
+        candidate = SonoraBlendColors(
+            SonoraBlendColors(palette[0], palette[1], 0.48),
+            SonoraBlendColors(palette[2], palette[3], 0.32),
+            0.42
+        );
+    } else if (palette.count > 0) {
+        candidate = palette.firstObject;
+    }
+    if (candidate == nil) {
+        candidate = [SonoraArtworkAccentColorService dominantAccentColorForImage:artwork fallback:UIColor.systemBackgroundColor];
+    }
+    return [candidate resolvedColorWithTraitCollection:trait];
+}
+
 UIColor *SonoraAccentYellowColor(void) {
     UIColor *fromHex = SonoraColorFromHexString(SonoraSettingsAccentHex());
     if (fromHex != nil) {
@@ -133,15 +157,29 @@ UIColor *SonoraPlayerBackgroundColor(void) {
 UIColor *SonoraAppBackgroundColor(void) {
     return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
         UIColor *baseColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:trait];
-        UIColor *customColor = SonoraColorFromHexString(SonoraSettingsAppBackgroundHex());
-        if (customColor == nil && SonoraSettingsUseAccentAppBackgroundEnabled()) {
-            customColor = SonoraAccentYellowColor();
+        UIColor *customColor = nil;
+        switch (SonoraSettingsAppBackgroundMode()) {
+            case SonoraAppBackgroundModeArtwork:
+                customColor = SonoraCurrentArtworkAppBackgroundSourceColor(trait);
+                break;
+            case SonoraAppBackgroundModeCustom:
+                customColor = SonoraColorFromHexString(SonoraSettingsAppBackgroundHex());
+                if (customColor == nil && SonoraSettingsUseAccentAppBackgroundEnabled()) {
+                    customColor = SonoraAccentYellowColor();
+                }
+                break;
+            case SonoraAppBackgroundModeSystem:
+            default:
+                break;
         }
         if (customColor == nil) {
             return baseColor;
         }
         UIColor *resolvedCustomColor = [customColor resolvedColorWithTraitCollection:trait];
-        CGFloat amount = (trait.userInterfaceStyle == UIUserInterfaceStyleDark) ? 0.18 : 0.12;
+        BOOL artworkMode = (SonoraSettingsAppBackgroundMode() == SonoraAppBackgroundModeArtwork);
+        CGFloat amount = (trait.userInterfaceStyle == UIUserInterfaceStyleDark)
+            ? (artworkMode ? 0.16 : 0.18)
+            : (artworkMode ? 0.11 : 0.12);
         return SonoraBlendColors(baseColor, resolvedCustomColor, amount);
     }];
 }

@@ -194,7 +194,7 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
     UILabel *appBackgroundValue = [self valueLabel];
     self.appBackgroundValueLabel = appBackgroundValue;
     [customizationStack addArrangedSubview:[self selectableValueRowWithTitle:@"App background"
-                                                                     subtitle:@"System background or custom #RRGGBB"
+                                                                     subtitle:@"System, artwork-adaptive or custom color"
                                                                    valueLabel:appBackgroundValue
                                                                        action:@selector(selectAppBackgroundTapped)]];
 
@@ -696,8 +696,20 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
 }
 
 - (void)refreshAppBackgroundLabel {
+    SonoraAppBackgroundMode mode = SonoraSettingsAppBackgroundMode();
     NSString *backgroundHex = SonoraSettingsAppBackgroundHex();
-    self.appBackgroundValueLabel.text = (backgroundHex.length > 0) ? backgroundHex : @"System";
+    switch (mode) {
+        case SonoraAppBackgroundModeArtwork:
+            self.appBackgroundValueLabel.text = @"Artwork";
+            break;
+        case SonoraAppBackgroundModeCustom:
+            self.appBackgroundValueLabel.text = (backgroundHex.length > 0) ? backgroundHex : @"Custom";
+            break;
+        case SonoraAppBackgroundModeSystem:
+        default:
+            self.appBackgroundValueLabel.text = @"System";
+            break;
+    }
 }
 
 - (void)refreshStreamingSearchEngineLabel {
@@ -725,7 +737,7 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
 
 - (void)selectAppBackgroundTapped {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"App background"
-                                                                   message:@"Choose a custom background color or return to the system background."
+                                                                   message:@"Choose system, custom color or artwork-adaptive background."
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Choose color"
                                               style:UIAlertActionStyleDefault
@@ -747,9 +759,22 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
             [self presentViewController:alert animated:YES completion:nil];
         }
     }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"From artwork"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction * _Nonnull action) {
+        SonoraSettingsSetAppBackgroundMode(SonoraAppBackgroundModeArtwork);
+        [self refreshAppBackgroundLabel];
+        self.view.backgroundColor = SonoraAppBackgroundColor();
+        UIView *firstSubview = self.view.subviews.firstObject;
+        if ([firstSubview isKindOfClass:UIScrollView.class]) {
+            ((UIScrollView *)firstSubview).backgroundColor = SonoraAppBackgroundColor();
+        }
+        [self notifyPlayerSettingsChanged];
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Use system"
                                               style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction * _Nonnull action) {
+        SonoraSettingsSetAppBackgroundMode(SonoraAppBackgroundModeSystem);
         SonoraSettingsStoreAppBackgroundHex(nil);
         [self refreshAppBackgroundLabel];
         self.view.backgroundColor = SonoraAppBackgroundColor();
@@ -770,6 +795,7 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
     (void)viewController;
     (void)continuously;
     if (self.colorPickerContext == SonoraSettingsColorPickerContextAppBackground) {
+        SonoraSettingsSetAppBackgroundMode(SonoraAppBackgroundModeCustom);
         SonoraSettingsStoreAppBackgroundHex([self hexStringForColor:color]);
         [self refreshAppBackgroundLabel];
     } else {
@@ -786,6 +812,7 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
 
 - (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)viewController API_AVAILABLE(ios(14.0)) {
     if (self.colorPickerContext == SonoraSettingsColorPickerContextAppBackground) {
+        SonoraSettingsSetAppBackgroundMode(SonoraAppBackgroundModeCustom);
         SonoraSettingsStoreAppBackgroundHex([self hexStringForColor:viewController.selectedColor]);
         [self refreshAppBackgroundLabel];
     } else {

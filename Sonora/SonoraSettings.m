@@ -14,6 +14,7 @@ static NSString * const SonoraSettingsMyWaveLookKey = @"sonora.settings.myWaveLo
 static NSString * const SonoraSettingsStreamingSearchEngineKey = @"sonora.settings.streamingSearchEngine";
 static NSString * const SonoraSettingsArtworkBasedPlayerBackgroundKey = @"sonora.settings.useArtworkBasedPlayerBackground";
 static NSString * const SonoraSettingsAccentAppBackgroundKey = @"sonora.settings.useAccentAppBackground";
+static NSString * const SonoraSettingsAppBackgroundModeKey = @"sonora.settings.appBackgroundMode";
 static NSString * const SonoraSettingsAppBackgroundHexKey = @"sonora.settings.appBackgroundHex";
 static NSString * const SonoraSettingsAutoSaveStreamingSongsKey = @"sonora.settings.autoSaveStreamingSongs";
 
@@ -114,6 +115,36 @@ void SonoraSettingsSetUseAccentAppBackgroundEnabled(BOOL enabled) {
     [SonoraSettingsDefaults() setBool:enabled forKey:SonoraSettingsAccentAppBackgroundKey];
 }
 
+SonoraAppBackgroundMode SonoraSettingsAppBackgroundMode(void) {
+    NSUserDefaults *defaults = SonoraSettingsDefaults();
+    if ([defaults objectForKey:SonoraSettingsAppBackgroundModeKey] == nil) {
+        if ([defaults objectForKey:SonoraSettingsAppBackgroundHexKey] != nil ||
+            [defaults objectForKey:SonoraSettingsAccentAppBackgroundKey] != nil) {
+            return SonoraAppBackgroundModeCustom;
+        }
+        return SonoraAppBackgroundModeSystem;
+    }
+    NSInteger rawValue = [defaults integerForKey:SonoraSettingsAppBackgroundModeKey];
+    if (rawValue == SonoraAppBackgroundModeArtwork) {
+        return SonoraAppBackgroundModeArtwork;
+    }
+    if (rawValue == SonoraAppBackgroundModeCustom) {
+        return SonoraAppBackgroundModeCustom;
+    }
+    return SonoraAppBackgroundModeSystem;
+}
+
+void SonoraSettingsSetAppBackgroundMode(SonoraAppBackgroundMode mode) {
+    NSInteger rawValue = SonoraAppBackgroundModeSystem;
+    if (mode == SonoraAppBackgroundModeArtwork) {
+        rawValue = SonoraAppBackgroundModeArtwork;
+    } else if (mode == SonoraAppBackgroundModeCustom) {
+        rawValue = SonoraAppBackgroundModeCustom;
+    }
+    [SonoraSettingsDefaults() setInteger:rawValue forKey:SonoraSettingsAppBackgroundModeKey];
+    [SonoraSettingsDefaults() removeObjectForKey:SonoraSettingsAccentAppBackgroundKey];
+}
+
 NSString *SonoraSettingsAppBackgroundHex(void) {
     return [SonoraSettingsDefaults() stringForKey:SonoraSettingsAppBackgroundHexKey];
 }
@@ -127,6 +158,9 @@ void SonoraSettingsStoreAppBackgroundHex(NSString * _Nullable hex) {
         [defaults setObject:trimmed forKey:SonoraSettingsAppBackgroundHexKey];
     }
     [defaults removeObjectForKey:SonoraSettingsAccentAppBackgroundKey];
+    if (trimmed.length > 0) {
+        [defaults setInteger:SonoraAppBackgroundModeCustom forKey:SonoraSettingsAppBackgroundModeKey];
+    }
 }
 
 BOOL SonoraSettingsAutoSaveStreamingSongsEnabled(void) {

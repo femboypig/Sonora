@@ -12,6 +12,12 @@ typedef NS_ENUM(NSInteger, SonoraStreamingSearchEngine) {
     SonoraStreamingSearchEngineYouTube = 1
 };
 
+typedef NS_ENUM(NSInteger, SonoraAppBackgroundMode) {
+    SonoraAppBackgroundModeSystem = 0,
+    SonoraAppBackgroundModeArtwork = 1,
+    SonoraAppBackgroundModeCustom = 2
+};
+
 FOUNDATION_EXTERN NSString * _Nullable SonoraSettingsAccentHex(void);
 FOUNDATION_EXTERN NSInteger SonoraSettingsLegacyAccentColorIndex(void);
 FOUNDATION_EXTERN void SonoraSettingsStoreAccentHex(NSString *hex);
@@ -32,6 +38,8 @@ FOUNDATION_EXTERN BOOL SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled(void
 FOUNDATION_EXTERN void SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(BOOL enabled);
 FOUNDATION_EXTERN BOOL SonoraSettingsUseAccentAppBackgroundEnabled(void);
 FOUNDATION_EXTERN void SonoraSettingsSetUseAccentAppBackgroundEnabled(BOOL enabled);
+FOUNDATION_EXTERN SonoraAppBackgroundMode SonoraSettingsAppBackgroundMode(void);
+FOUNDATION_EXTERN void SonoraSettingsSetAppBackgroundMode(SonoraAppBackgroundMode mode);
 FOUNDATION_EXTERN NSString * _Nullable SonoraSettingsAppBackgroundHex(void);
 FOUNDATION_EXTERN void SonoraSettingsStoreAppBackgroundHex(NSString * _Nullable hex);
 
