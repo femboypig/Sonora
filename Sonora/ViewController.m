@@ -14,6 +14,7 @@
 #import "SonoraMusicUIHelpers.h"
 #import "SonoraMusicModule.h"
 #import "SonoraPlayerViewController.h"
+#import "SonoraSettings.h"
 #import "SonoraSettingsViewController.h"
 #import "SonoraServices.h"
 
