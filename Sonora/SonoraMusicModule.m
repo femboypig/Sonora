@@ -2297,6 +2297,11 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
                                          [resolvedExtension.lowercaseString isEqualToString:@"mp3"]);
         void (^finalizeInstall)(void) = ^{
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (!SonoraSettingsAutoSaveStreamingSongsEnabled()) {
+                    [[NSFileManager defaultManager] removeItemAtURL:destinationURL error:nil];
+                    cleanup();
+                    return;
+                }
                 cleanup();
                 SonoraDiagnosticsLog(@"mini-streaming", [NSString stringWithFormat:@"download_completed track=%@ path=%@",
                                                          trackID,
@@ -2347,6 +2352,9 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
         }
 
         NSString *currentTrackID = strongSelf.miniStreamingCurrentPlaybackTrackID ?: @"";
+        if (!SonoraSettingsAutoSaveStreamingSongsEnabled()) {
+            return;
+        }
         if (currentTrackID.length > 0 && ![currentTrackID isEqualToString:trackID]) {
             return;
         }
