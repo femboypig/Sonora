@@ -22,6 +22,7 @@ typedef NS_ENUM(NSInteger, SonoraPlayerArtworkStyle) {
 FOUNDATION_EXTERN void SonoraConfigureNavigationIconBarButtonItem(UIBarButtonItem *item, NSString *title);
 FOUNDATION_EXTERN UIColor *SonoraAccentYellowColor(void);
 FOUNDATION_EXTERN UIColor *SonoraLovelyAccentRedColor(void);
+FOUNDATION_EXTERN void SonoraRefreshArtworkAppBackgroundColor(void);
 FOUNDATION_EXTERN SonoraPlayerFontStyle SonoraPlayerFontStyleFromDefaults(void);
 FOUNDATION_EXTERN UIColor *SonoraPlayerBackgroundColor(void);
 FOUNDATION_EXTERN UIColor *SonoraAppBackgroundColor(void);

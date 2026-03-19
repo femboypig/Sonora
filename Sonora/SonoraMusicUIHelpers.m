@@ -14,6 +14,7 @@ NSString * const SonoraSharedPlaylistSyntheticPrefix = @"shared:";
 CGFloat const SonoraSearchRevealThreshold = 62.0;
 
 static CGFloat const SonoraSearchDismissThreshold = 40.0;
+static UIColor *SonoraCachedArtworkAppBackgroundColor = nil;
 
 static UIColor *SonoraBlendColors(UIColor *baseColor, UIColor *overlayColor, CGFloat amount) {
     CGFloat mix = MAX(0.0, MIN(1.0, amount));
@@ -124,6 +125,10 @@ static UIColor * _Nullable SonoraCurrentArtworkAppBackgroundSourceColor(UITraitC
     return [candidate resolvedColorWithTraitCollection:trait];
 }
 
+void SonoraRefreshArtworkAppBackgroundColor(void) {
+    SonoraCachedArtworkAppBackgroundColor = SonoraCurrentArtworkAppBackgroundSourceColor(UIScreen.mainScreen.traitCollection);
+}
+
 UIColor *SonoraAccentYellowColor(void) {
     UIColor *fromHex = SonoraColorFromHexString(SonoraSettingsAccentHex());
     if (fromHex != nil) {
@@ -159,7 +164,7 @@ UIColor *SonoraAppBackgroundColor(void) {
         UIColor *customColor = nil;
         switch (SonoraSettingsAppBackgroundMode()) {
             case SonoraAppBackgroundModeArtwork:
-                customColor = SonoraCurrentArtworkAppBackgroundSourceColor(trait);
+                customColor = SonoraCachedArtworkAppBackgroundColor;
                 break;
             case SonoraAppBackgroundModeCustom:
                 customColor = SonoraColorFromHexString(SonoraSettingsAppBackgroundHex());

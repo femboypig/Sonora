@@ -98,6 +98,7 @@ static void SonoraApplyAppBackgroundToViewHierarchy(UIView *view) {
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    SonoraRefreshArtworkAppBackgroundColor();
     self.delegate = self;
     [self setupTabs];
     [self setupAppearance];
@@ -412,6 +413,7 @@ static void SonoraApplyAppBackgroundToViewHierarchy(UIView *view) {
 
 - (void)handlePlaybackStateChanged {
     if (SonoraSettingsAppBackgroundMode() == SonoraAppBackgroundModeArtwork) {
+        SonoraRefreshArtworkAppBackgroundColor();
         [self setupAppearance];
         self.view.backgroundColor = SonoraAppBackgroundColor();
         self.miniPlayerContainer.backgroundColor = SonoraMiniPlayerBackgroundColor();
