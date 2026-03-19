@@ -85,7 +85,7 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
 @property (nonatomic, strong) UISegmentedControl *fontControl;
 @property (nonatomic, strong) UISegmentedControl *artworkStyleControl;
 @property (nonatomic, strong) UISegmentedControl *myWaveLookControl;
-@property (nonatomic, strong) UISegmentedControl *playerBackgroundModeControl;
+@property (nonatomic, strong) UISwitch *playerArtworkBackgroundSwitch;
 @property (nonatomic, strong) UISwitch *autoSaveStreamingSongsSwitch;
 @property (nonatomic, strong) UISwitch *artworkEqualizerSwitch;
 @property (nonatomic, strong) UISwitch *preservePlayerModesSwitch;
@@ -184,12 +184,12 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
                                                               subtitle:@"Previous clouds or contour rings on Home"
                                                                control:myWaveLookControl]];
 
-    UISegmentedControl *playerBackgroundModeControl = [[UISegmentedControl alloc] initWithItems:@[@"System", @"Custom", @"Artwork"]];
-    [playerBackgroundModeControl addTarget:self action:@selector(playerBackgroundModeChanged:) forControlEvents:UIControlEventValueChanged];
-    self.playerBackgroundModeControl = playerBackgroundModeControl;
-    [customizationStack addArrangedSubview:[self segmentedRowWithTitle:@"Player background"
-                                                              subtitle:@"Use system, app background, or adapt to artwork"
-                                                               control:playerBackgroundModeControl]];
+    UISwitch *playerArtworkBackgroundSwitch = [[UISwitch alloc] init];
+    [playerArtworkBackgroundSwitch addTarget:self action:@selector(playerArtworkBackgroundChanged:) forControlEvents:UIControlEventValueChanged];
+    self.playerArtworkBackgroundSwitch = playerArtworkBackgroundSwitch;
+    [customizationStack addArrangedSubview:[self switchRowWithTitle:@"Player background from artwork"
+                                                           subtitle:@"Use the dominant cover color behind the player"
+                                                            control:playerArtworkBackgroundSwitch]];
 
     UILabel *appBackgroundValue = [self valueLabel];
     self.appBackgroundValueLabel = appBackgroundValue;
@@ -564,7 +564,7 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
     NSInteger artworkStyle = SonoraSettingsArtworkStyleIndex();
     NSInteger myWaveLook = SonoraSettingsMyWaveLook();
     SonoraStreamingSearchEngine streamingSearchEngine = SonoraSettingsStreamingSearchEngine();
-    SonoraPlayerBackgroundMode playerBackgroundMode = SonoraSettingsPlayerBackgroundMode();
+    BOOL useArtworkBasedPlayerBackground = SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled();
     BOOL autoSaveStreamingSongs = SonoraSettingsAutoSaveStreamingSongsEnabled();
     BOOL artworkEqualizerEnabled = SonoraSettingsArtworkEqualizerEnabled();
     BOOL preserveModes = SonoraSettingsPreservePlayerModesEnabled();
@@ -589,7 +589,7 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
     self.fontControl.selectedSegmentIndex = MAX(0, MIN(1, font));
     self.artworkStyleControl.selectedSegmentIndex = MAX(0, MIN(1, artworkStyle));
     self.myWaveLookControl.selectedSegmentIndex = myWaveLook;
-    self.playerBackgroundModeControl.selectedSegmentIndex = MAX(0, MIN(2, playerBackgroundMode));
+    self.playerArtworkBackgroundSwitch.on = useArtworkBasedPlayerBackground;
     self.autoSaveStreamingSongsSwitch.on = autoSaveStreamingSongs;
     self.artworkEqualizerSwitch.on = artworkEqualizerEnabled;
     self.preservePlayerModesSwitch.on = preserveModes;
@@ -631,10 +631,8 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
     [self notifyPlayerSettingsChanged];
 }
 
-- (void)playerBackgroundModeChanged:(UISegmentedControl *)sender {
-    NSInteger selected = MAX((NSInteger)SonoraPlayerBackgroundModeSystem,
-                             MIN((NSInteger)SonoraPlayerBackgroundModeArtwork, sender.selectedSegmentIndex));
-    SonoraSettingsSetPlayerBackgroundMode((SonoraPlayerBackgroundMode)selected);
+- (void)playerArtworkBackgroundChanged:(UISwitch *)sender {
+    SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(sender.isOn);
     [self notifyPlayerSettingsChanged];
 }
 
@@ -1283,7 +1281,6 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
         @"fontStyle": (SonoraSettingsFontStyleIndex() == 1 ? @"serif" : @"system"),
         @"artworkStyle": (SonoraSettingsArtworkStyleIndex() == 0 ? @"square" : @"rounded"),
         @"streamingSearchEngine": (SonoraSettingsStreamingSearchEngine() == SonoraStreamingSearchEngineYouTube ? @"youtube" : @"spotify"),
-        @"playerBackgroundMode": @(SonoraSettingsPlayerBackgroundMode()),
         @"useArtworkBasedPlayerBackground": @(SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled()),
         @"appBackgroundHex": SonoraSettingsAppBackgroundHex() ?: @"",
         @"autoSaveStreamingSongs": @(SonoraSettingsAutoSaveStreamingSongsEnabled()),
@@ -1332,19 +1329,8 @@ typedef NS_ENUM(NSInteger, SonoraSettingsColorPickerContext) {
     }
     SonoraSettingsSetStreamingSearchEngine(engine);
 
-    id playerBackgroundModeValue = settings[@"playerBackgroundMode"];
-    if ([playerBackgroundModeValue respondsToSelector:@selector(integerValue)]) {
-        NSInteger rawMode = [playerBackgroundModeValue integerValue];
-        SonoraPlayerBackgroundMode mode = SonoraPlayerBackgroundModeSystem;
-        if (rawMode == SonoraPlayerBackgroundModeApp || rawMode == SonoraPlayerBackgroundModeArtwork) {
-            mode = (SonoraPlayerBackgroundMode)rawMode;
-        }
-        SonoraSettingsSetPlayerBackgroundMode(mode);
-    }
-
     id artworkBackgroundValue = settings[@"useArtworkBasedPlayerBackground"];
-    if ([playerBackgroundModeValue respondsToSelector:@selector(integerValue)] == NO &&
-        [artworkBackgroundValue respondsToSelector:@selector(boolValue)]) {
+    if ([artworkBackgroundValue respondsToSelector:@selector(boolValue)]) {
         SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled([artworkBackgroundValue boolValue]);
     }
 
