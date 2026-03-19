@@ -4,6 +4,7 @@
 //
 
 #import "SonoraCells.h"
+#import "SonoraMusicUIHelpers.h"
 
 static UIColor *SonoraCellsDefaultAccentColor(void) {
     return [UIColor colorWithRed:1.0 green:0.83 blue:0.08 alpha:1.0];
@@ -77,6 +78,8 @@ static UIColor *SonoraCellsAccentColor(void) {
     self.preservesSuperviewLayoutMargins = NO;
     self.separatorInset = UIEdgeInsetsMake(0.0, 60.0, 0.0, 12.0);
     self.layoutMargins = UIEdgeInsetsZero;
+    self.backgroundColor = SonoraAppBackgroundColor();
+    self.contentView.backgroundColor = SonoraAppBackgroundColor();
 
     UIImageView *coverView = [[UIImageView alloc] init];
     coverView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -173,6 +176,8 @@ static UIColor *SonoraCellsAccentColor(void) {
     self.preservesSuperviewLayoutMargins = NO;
     self.separatorInset = UIEdgeInsetsMake(0.0, 62.0, 0.0, 12.0);
     self.layoutMargins = UIEdgeInsetsZero;
+    self.backgroundColor = SonoraAppBackgroundColor();
+    self.contentView.backgroundColor = SonoraAppBackgroundColor();
 
     UIImageView *coverView = [[UIImageView alloc] init];
     coverView.translatesAutoresizingMaskIntoConstraints = NO;

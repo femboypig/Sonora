@@ -2966,6 +2966,8 @@ typedef NS_ENUM(NSInteger, SonoraSearchSectionType) {
     if (cell == nil) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"MusicSearchMetaCell"];
     }
+    cell.backgroundColor = SonoraAppBackgroundColor();
+    cell.contentView.backgroundColor = SonoraAppBackgroundColor();
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.textLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
