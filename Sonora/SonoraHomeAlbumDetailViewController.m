@@ -8,6 +8,7 @@
 #import <math.h>
 
 #import "SonoraCells.h"
+#import "SonoraMusicUIHelpers.h"
 #import "SonoraPlayerViewController.h"
 #import "SonoraSettings.h"
 #import "SonoraSleepTimerUI.h"
@@ -100,7 +101,7 @@ static UIColor *SonoraHomeAlbumDetailAccentColor(void) {
     self.navigationItem.title = nil;
     self.navigationItem.titleView = nil;
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = SonoraAppBackgroundColor();
     self.navigationItem.rightBarButtonItem = nil;
 
     [self setupTableView];
@@ -147,6 +148,7 @@ static UIColor *SonoraHomeAlbumDetailAccentColor(void) {
     tableView.delegate = self;
     tableView.rowHeight = 54.0;
     tableView.alwaysBounceVertical = YES;
+    tableView.backgroundColor = SonoraAppBackgroundColor();
     tableView.separatorStyle = UITableViewCellSeparatorStyleSingleLine;
     if (@available(iOS 15.0, *)) {
         tableView.sectionHeaderTopPadding = 0.0;
@@ -431,4 +433,3 @@ static UIColor *SonoraHomeAlbumDetailAccentColor(void) {
 }
 
 @end
-

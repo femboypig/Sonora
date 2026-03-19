@@ -13,6 +13,7 @@ static NSString * const SonoraSettingsTrackGapKey = @"sonora.settings.trackGapSe
 static NSString * const SonoraSettingsMyWaveLookKey = @"sonora.settings.myWaveLook";
 static NSString * const SonoraSettingsStreamingSearchEngineKey = @"sonora.settings.streamingSearchEngine";
 static NSString * const SonoraSettingsArtworkBasedPlayerBackgroundKey = @"sonora.settings.useArtworkBasedPlayerBackground";
+static NSString * const SonoraSettingsAccentAppBackgroundKey = @"sonora.settings.useAccentAppBackground";
 static NSString * const SonoraSettingsAutoSaveStreamingSongsKey = @"sonora.settings.autoSaveStreamingSongs";
 
 static NSUserDefaults *SonoraSettingsDefaults(void) {
@@ -98,6 +99,18 @@ BOOL SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled(void) {
 
 void SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(BOOL enabled) {
     [SonoraSettingsDefaults() setBool:enabled forKey:SonoraSettingsArtworkBasedPlayerBackgroundKey];
+}
+
+BOOL SonoraSettingsUseAccentAppBackgroundEnabled(void) {
+    NSUserDefaults *defaults = SonoraSettingsDefaults();
+    if ([defaults objectForKey:SonoraSettingsAccentAppBackgroundKey] == nil) {
+        return NO;
+    }
+    return [defaults boolForKey:SonoraSettingsAccentAppBackgroundKey];
+}
+
+void SonoraSettingsSetUseAccentAppBackgroundEnabled(BOOL enabled) {
+    [SonoraSettingsDefaults() setBool:enabled forKey:SonoraSettingsAccentAppBackgroundKey];
 }
 
 BOOL SonoraSettingsAutoSaveStreamingSongsEnabled(void) {

@@ -6,6 +6,7 @@
 #import "SonoraCollectionsViewController.h"
 
 #import "SonoraHomeAlbumDetailViewController.h"
+#import "SonoraMusicUIHelpers.h"
 #import "SonoraMusicModule.h"
 #import "SonoraPlaylistViewControllers.h"
 #import "SonoraPlayerViewController.h"
@@ -702,7 +703,7 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
     self.navigationItem.title = nil;
     self.navigationItem.titleView = nil;
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = SonoraAppBackgroundColor();
 
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:SonoraCollectionsNavigationTitleView(@"Collections")];
 }
@@ -712,7 +713,7 @@ static NSArray<NSString *> *SonoraCollectionsArtistParticipants(NSString *artist
     UICollectionView *collectionView = [[UICollectionView alloc] initWithFrame:CGRectZero
                                                            collectionViewLayout:layout];
     collectionView.translatesAutoresizingMaskIntoConstraints = NO;
-    collectionView.backgroundColor = UIColor.systemBackgroundColor;
+    collectionView.backgroundColor = SonoraAppBackgroundColor();
     collectionView.alwaysBounceVertical = YES;
     collectionView.dataSource = self;
     collectionView.delegate = self;

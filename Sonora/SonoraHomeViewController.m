@@ -12,6 +12,7 @@
 #import "SonoraCells.h"
 #import "SonoraHistoryViewController.h"
 #import "SonoraHomeAlbumDetailViewController.h"
+#import "SonoraMusicUIHelpers.h"
 #import "SonoraWaveBackgroundViews.h"
 #import "SonoraPlayerViewController.h"
 #import "SonoraSettingsViewController.h"
@@ -824,7 +825,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
     self.navigationItem.title = nil;
     self.navigationItem.titleView = nil;
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = SonoraAppBackgroundColor();
     [self applyTransparentNavigationBarAppearance];
 
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:SonoraHomeNavigationTitleView(@"Home")];
@@ -849,7 +850,7 @@ static SonoraMyWaveLook SonoraCurrentMyWaveLook(void) {
     UICollectionView *collectionView = [[UICollectionView alloc] initWithFrame:CGRectZero
                                                            collectionViewLayout:layout];
     collectionView.translatesAutoresizingMaskIntoConstraints = NO;
-    collectionView.backgroundColor = UIColor.systemBackgroundColor;
+    collectionView.backgroundColor = SonoraAppBackgroundColor();
     collectionView.alwaysBounceVertical = YES;
     collectionView.dataSource = self;
     collectionView.delegate = self;

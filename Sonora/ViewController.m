@@ -11,6 +11,7 @@
 
 #import "SonoraCollectionsViewController.h"
 #import "SonoraHomeViewController.h"
+#import "SonoraMusicUIHelpers.h"
 #import "SonoraMusicModule.h"
 #import "SonoraPlayerViewController.h"
 #import "SonoraSettingsViewController.h"
@@ -242,7 +243,7 @@ static UIColor *SonoraMiniPlayerBorderColor(void) {
     if (@available(iOS 26.0, *)) {
         navAppearance.backgroundColor = nil;
     } else {
-        navAppearance.backgroundColor = UIColor.systemBackgroundColor;
+        navAppearance.backgroundColor = SonoraAppBackgroundColor();
     }
     navAppearance.titleTextAttributes = @{
         NSForegroundColorAttributeName: UIColor.labelColor,

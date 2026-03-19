@@ -6,6 +6,7 @@
 #import "SonoraHistoryViewController.h"
 
 #import "SonoraCells.h"
+#import "SonoraMusicUIHelpers.h"
 #import "SonoraPlayerViewController.h"
 #import "SonoraServices.h"
 
@@ -28,7 +29,7 @@ static UIViewController * _Nullable SonoraInstantiatePlayerFromHistory(void) {
     self.title = @"History";
     self.navigationItem.hidesBackButton = YES;
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = SonoraAppBackgroundColor();
 
     UISwipeGestureRecognizer *swipeRight = [[UISwipeGestureRecognizer alloc] initWithTarget:self
                                                                                       action:@selector(handleDismissSwipe)];
@@ -72,6 +73,7 @@ static UIViewController * _Nullable SonoraInstantiatePlayerFromHistory(void) {
     tableView.delegate = self;
     tableView.rowHeight = 54.0;
     tableView.alwaysBounceVertical = YES;
+    tableView.backgroundColor = SonoraAppBackgroundColor();
     if (@available(iOS 15.0, *)) {
         tableView.sectionHeaderTopPadding = 0.0;
     }

@@ -14,6 +14,41 @@ CGFloat const SonoraSearchRevealThreshold = 62.0;
 
 static CGFloat const SonoraSearchDismissThreshold = 40.0;
 
+static UIColor *SonoraBlendColors(UIColor *baseColor, UIColor *overlayColor, CGFloat amount) {
+    CGFloat mix = MAX(0.0, MIN(1.0, amount));
+    CGFloat baseRed = 0.0;
+    CGFloat baseGreen = 0.0;
+    CGFloat baseBlue = 0.0;
+    CGFloat baseAlpha = 0.0;
+    CGFloat overlayRed = 0.0;
+    CGFloat overlayGreen = 0.0;
+    CGFloat overlayBlue = 0.0;
+    CGFloat overlayAlpha = 0.0;
+
+    if (![baseColor getRed:&baseRed green:&baseGreen blue:&baseBlue alpha:&baseAlpha]) {
+        CGFloat white = 0.0;
+        if ([baseColor getWhite:&white alpha:&baseAlpha]) {
+            baseRed = white;
+            baseGreen = white;
+            baseBlue = white;
+        }
+    }
+
+    if (![overlayColor getRed:&overlayRed green:&overlayGreen blue:&overlayBlue alpha:&overlayAlpha]) {
+        CGFloat white = 0.0;
+        if ([overlayColor getWhite:&white alpha:&overlayAlpha]) {
+            overlayRed = white;
+            overlayGreen = white;
+            overlayBlue = white;
+        }
+    }
+
+    return [UIColor colorWithRed:(baseRed + ((overlayRed - baseRed) * mix))
+                           green:(baseGreen + ((overlayGreen - baseGreen) * mix))
+                            blue:(baseBlue + ((overlayBlue - baseBlue) * mix))
+                           alpha:1.0];
+}
+
 void SonoraConfigureNavigationIconBarButtonItem(UIBarButtonItem *item, NSString *title) {
     if (![item isKindOfClass:UIBarButtonItem.class]) {
         return;
@@ -92,6 +127,18 @@ UIColor *SonoraPlayerBackgroundColor(void) {
             return UIColor.blackColor;
         }
         return UIColor.systemBackgroundColor;
+    }];
+}
+
+UIColor *SonoraAppBackgroundColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+        UIColor *baseColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:trait];
+        if (!SonoraSettingsUseAccentAppBackgroundEnabled()) {
+            return baseColor;
+        }
+        UIColor *accentColor = [SonoraAccentYellowColor() resolvedColorWithTraitCollection:trait];
+        CGFloat amount = (trait.userInterfaceStyle == UIUserInterfaceStyleDark) ? 0.18 : 0.10;
+        return SonoraBlendColors(baseColor, accentColor, amount);
     }];
 }
 

@@ -9,6 +9,7 @@
 #import <math.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#import "SonoraMusicUIHelpers.h"
 #import "SonoraSettings.h"
 #import "SonoraSettingsBackupArchiveService.h"
 #import "SonoraSharedPlaylists.h"
@@ -80,6 +81,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 @property (nonatomic, strong) UISegmentedControl *artworkStyleControl;
 @property (nonatomic, strong) UISegmentedControl *myWaveLookControl;
 @property (nonatomic, strong) UISwitch *playerArtworkBackgroundSwitch;
+@property (nonatomic, strong) UISwitch *accentAppBackgroundSwitch;
 @property (nonatomic, strong) UISwitch *autoSaveStreamingSongsSwitch;
 @property (nonatomic, strong) UISwitch *artworkEqualizerSwitch;
 @property (nonatomic, strong) UISwitch *preservePlayerModesSwitch;
@@ -110,7 +112,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = SonoraAppBackgroundColor();
     self.title = @"Settings";
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
 
@@ -129,7 +131,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     UIScrollView *scrollView = [[UIScrollView alloc] init];
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     scrollView.alwaysBounceVertical = YES;
-    scrollView.backgroundColor = UIColor.systemBackgroundColor;
+    scrollView.backgroundColor = SonoraAppBackgroundColor();
 
     UIStackView *contentStack = [[UIStackView alloc] init];
     contentStack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -182,6 +184,13 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     [customizationStack addArrangedSubview:[self switchRowWithTitle:@"Player background from artwork"
                                                            subtitle:@"Use the dominant cover color behind the player"
                                                             control:playerArtworkBackgroundSwitch]];
+
+    UISwitch *accentAppBackgroundSwitch = [[UISwitch alloc] init];
+    [accentAppBackgroundSwitch addTarget:self action:@selector(accentAppBackgroundChanged:) forControlEvents:UIControlEventValueChanged];
+    self.accentAppBackgroundSwitch = accentAppBackgroundSwitch;
+    [customizationStack addArrangedSubview:[self switchRowWithTitle:@"App background from accent"
+                                                           subtitle:@"Tint screens with the current accent color"
+                                                            control:accentAppBackgroundSwitch]];
 
     UILabel *accentColorValue = [self valueLabel];
     self.accentColorValueLabel = accentColorValue;
@@ -550,6 +559,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     NSInteger myWaveLook = SonoraSettingsMyWaveLook();
     SonoraStreamingSearchEngine streamingSearchEngine = SonoraSettingsStreamingSearchEngine();
     BOOL useArtworkBasedPlayerBackground = SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled();
+    BOOL useAccentAppBackground = SonoraSettingsUseAccentAppBackgroundEnabled();
     BOOL autoSaveStreamingSongs = SonoraSettingsAutoSaveStreamingSongsEnabled();
     BOOL artworkEqualizerEnabled = SonoraSettingsArtworkEqualizerEnabled();
     BOOL preserveModes = SonoraSettingsPreservePlayerModesEnabled();
@@ -575,6 +585,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     self.artworkStyleControl.selectedSegmentIndex = MAX(0, MIN(1, artworkStyle));
     self.myWaveLookControl.selectedSegmentIndex = myWaveLook;
     self.playerArtworkBackgroundSwitch.on = useArtworkBasedPlayerBackground;
+    self.accentAppBackgroundSwitch.on = useAccentAppBackground;
     self.autoSaveStreamingSongsSwitch.on = autoSaveStreamingSongs;
     self.artworkEqualizerSwitch.on = artworkEqualizerEnabled;
     self.preservePlayerModesSwitch.on = preserveModes;
@@ -592,6 +603,11 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     [self refreshOnlinePlaylistCacheLabel];
     [self refreshStreamingSearchEngineLabel];
     [self refreshAccentColorLabel];
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    UIView *firstSubview = self.view.subviews.firstObject;
+    if ([firstSubview isKindOfClass:UIScrollView.class]) {
+        ((UIScrollView *)firstSubview).backgroundColor = SonoraAppBackgroundColor();
+    }
 }
 
 - (void)fontChanged:(UISegmentedControl *)sender {
@@ -612,6 +628,16 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
 
 - (void)playerArtworkBackgroundChanged:(UISwitch *)sender {
     SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(sender.isOn);
+    [self notifyPlayerSettingsChanged];
+}
+
+- (void)accentAppBackgroundChanged:(UISwitch *)sender {
+    SonoraSettingsSetUseAccentAppBackgroundEnabled(sender.isOn);
+    self.view.backgroundColor = SonoraAppBackgroundColor();
+    UIView *firstSubview = self.view.subviews.firstObject;
+    if ([firstSubview isKindOfClass:UIScrollView.class]) {
+        ((UIScrollView *)firstSubview).backgroundColor = SonoraAppBackgroundColor();
+    }
     [self notifyPlayerSettingsChanged];
 }
 
@@ -1194,6 +1220,7 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
         @"artworkStyle": (SonoraSettingsArtworkStyleIndex() == 0 ? @"square" : @"rounded"),
         @"streamingSearchEngine": (SonoraSettingsStreamingSearchEngine() == SonoraStreamingSearchEngineYouTube ? @"youtube" : @"spotify"),
         @"useArtworkBasedPlayerBackground": @(SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled()),
+        @"useAccentAppBackground": @(SonoraSettingsUseAccentAppBackgroundEnabled()),
         @"autoSaveStreamingSongs": @(SonoraSettingsAutoSaveStreamingSongsEnabled()),
         @"accentHex": [self hexStringForColor:[self currentAccentColor]],
         @"preservePlayerModes": @(SonoraSettingsPreservePlayerModesEnabled()),
@@ -1243,6 +1270,11 @@ static NSString * const SonoraSettingsGitHubDisplayString = @"femboypig/Sonora";
     id artworkBackgroundValue = settings[@"useArtworkBasedPlayerBackground"];
     if ([artworkBackgroundValue respondsToSelector:@selector(boolValue)]) {
         SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled([artworkBackgroundValue boolValue]);
+    }
+
+    id accentAppBackgroundValue = settings[@"useAccentAppBackground"];
+    if ([accentAppBackgroundValue respondsToSelector:@selector(boolValue)]) {
+        SonoraSettingsSetUseAccentAppBackgroundEnabled([accentAppBackgroundValue boolValue]);
     }
 
     id autoSaveStreamingSongsValue = settings[@"autoSaveStreamingSongs"];

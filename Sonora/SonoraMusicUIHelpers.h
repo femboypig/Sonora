@@ -24,6 +24,7 @@ FOUNDATION_EXTERN UIColor *SonoraAccentYellowColor(void);
 FOUNDATION_EXTERN UIColor *SonoraLovelyAccentRedColor(void);
 FOUNDATION_EXTERN SonoraPlayerFontStyle SonoraPlayerFontStyleFromDefaults(void);
 FOUNDATION_EXTERN UIColor *SonoraPlayerBackgroundColor(void);
+FOUNDATION_EXTERN UIColor *SonoraAppBackgroundColor(void);
 FOUNDATION_EXTERN UIColor *SonoraPlayerPrimaryColor(void);
 FOUNDATION_EXTERN UIColor *SonoraPlayerSecondaryColor(void);
 FOUNDATION_EXTERN UIColor *SonoraPlayerTimelineMaxColor(void);
