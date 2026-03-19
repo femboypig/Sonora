@@ -606,7 +606,7 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
     }
 
     NSMutableArray *gradientColors = [NSMutableArray arrayWithCapacity:4];
-    NSArray<NSNumber *> *mixes = isDark ? @[@0.36, @0.24, @0.14, @0.08] : @[@0.24, @0.14, @0.08, @0.04];
+    NSArray<NSNumber *> *mixes = isDark ? @[@0.24, @0.16, @0.10, @0.05] : @[@0.24, @0.14, @0.08, @0.04];
     for (NSUInteger idx = 0; idx < 4; idx += 1) {
         UIColor *paletteColor = palette[idx % palette.count];
         CGFloat red = 0.0;
