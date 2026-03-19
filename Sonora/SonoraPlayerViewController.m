@@ -142,8 +142,6 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
 @property (nonatomic, strong) NSLayoutConstraint *artworkTrailingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *controlsBottomConstraint;
 @property (nonatomic, strong, nullable) UIColor *currentArtworkBackgroundColor;
-@property (nonatomic, strong, nullable) UIColor *currentButtonBackgroundColor;
-@property (nonatomic, strong, nullable) UIColor *currentButtonBorderColor;
 @property (nonatomic, assign) BOOL scrubbing;
 
 @end
@@ -498,6 +496,20 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
     UIColor *resolvedBackground = SonoraPlayerBackgroundColor();
     if (SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() && self.currentArtworkBackgroundColor != nil) {
         resolvedBackground = self.currentArtworkBackgroundColor;
+        CGFloat red = 0.0;
+        CGFloat green = 0.0;
+        CGFloat blue = 0.0;
+        CGFloat alpha = 1.0;
+        if ([resolvedBackground getRed:&red green:&green blue:&blue alpha:&alpha]) {
+            CGFloat luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+            if (luminance > 0.58) {
+                primary = [UIColor colorWithWhite:0.10 alpha:1.0];
+                secondary = [UIColor colorWithWhite:0.10 alpha:0.68];
+            } else {
+                primary = [UIColor colorWithWhite:1.0 alpha:0.96];
+                secondary = [UIColor colorWithWhite:1.0 alpha:0.70];
+            }
+        }
     }
 
     self.view.backgroundColor = resolvedBackground;
@@ -540,11 +552,10 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
         if (height < 1.0) {
             height = 42.0;
         }
-        BOOL useButtonSurfaces = SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() && self.currentButtonBackgroundColor != nil;
-        button.backgroundColor = useButtonSurfaces ? self.currentButtonBackgroundColor : UIColor.clearColor;
+        button.backgroundColor = UIColor.clearColor;
         button.layer.cornerRadius = 0.0;
-        button.layer.borderWidth = useButtonSurfaces ? 1.0 : 0.0;
-        button.layer.borderColor = useButtonSurfaces ? self.currentButtonBorderColor.CGColor : nil;
+        button.layer.borderWidth = 0.0;
+        button.layer.borderColor = nil;
         button.layer.masksToBounds = YES;
     }
 
@@ -595,7 +606,7 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
     }
 
     NSMutableArray *gradientColors = [NSMutableArray arrayWithCapacity:4];
-    NSArray<NSNumber *> *mixes = isDark ? @[@0.22, @0.18, @0.12, @0.08] : @[@0.10, @0.08, @0.05, @0.03];
+    NSArray<NSNumber *> *mixes = isDark ? @[@0.36, @0.24, @0.14, @0.08] : @[@0.24, @0.14, @0.08, @0.04];
     for (NSUInteger idx = 0; idx < 4; idx += 1) {
         UIColor *paletteColor = palette[idx % palette.count];
         CGFloat red = 0.0;
@@ -617,22 +628,6 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
     }
 
     self.backgroundGradientLayer.colors = gradientColors;
-    UIColor *anchor = self.currentArtworkBackgroundColor ?: base;
-    CGFloat luminance = 0.0;
-    CGFloat anchorRed = 0.0;
-    CGFloat anchorGreen = 0.0;
-    CGFloat anchorBlue = 0.0;
-    CGFloat anchorAlpha = 1.0;
-    if ([anchor getRed:&anchorRed green:&anchorGreen blue:&anchorBlue alpha:&anchorAlpha]) {
-        luminance = (0.2126 * anchorRed) + (0.7152 * anchorGreen) + (0.0722 * anchorBlue);
-    }
-    BOOL useDarkForeground = luminance > 0.58;
-    self.currentButtonBackgroundColor = useDarkForeground
-        ? [UIColor colorWithWhite:1.0 alpha:0.16]
-        : [UIColor colorWithWhite:0.0 alpha:0.16];
-    self.currentButtonBorderColor = useDarkForeground
-        ? [UIColor colorWithWhite:0.0 alpha:0.08]
-        : [UIColor colorWithWhite:1.0 alpha:0.10];
 }
 
 - (void)updateArtworkCornerRadius {
