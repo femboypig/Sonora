@@ -495,8 +495,11 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
     UIColor *primary = SonoraPlayerPrimaryColor();
     UIColor *secondary = SonoraPlayerSecondaryColor();
     SonoraPlayerFontStyle fontStyle = SonoraPlayerFontStyleFromDefaults();
-    UIColor *resolvedBackground = SonoraPlayerBackgroundColor();
-    if (SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() && self.currentArtworkBackgroundColor != nil) {
+    SonoraPlayerBackgroundMode backgroundMode = SonoraSettingsPlayerBackgroundMode();
+    UIColor *resolvedBackground = (backgroundMode == SonoraPlayerBackgroundModeApp)
+        ? SonoraAppBackgroundColor()
+        : SonoraPlayerBackgroundColor();
+    if (backgroundMode == SonoraPlayerBackgroundModeArtwork && self.currentArtworkBackgroundColor != nil) {
         resolvedBackground = self.currentArtworkBackgroundColor;
         CGFloat red = 0.0;
         CGFloat green = 0.0;
@@ -516,7 +519,7 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
 
     self.view.backgroundColor = resolvedBackground;
     self.backgroundColorView.backgroundColor = resolvedBackground;
-    self.backgroundGradientLayer.hidden = !(SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() && self.backgroundGradientLayer.colors.count > 0);
+    self.backgroundGradientLayer.hidden = !(backgroundMode == SonoraPlayerBackgroundModeArtwork && self.backgroundGradientLayer.colors.count > 0);
     [self updateArtworkCornerRadius];
     self.titleLabel.textColor = primary;
     self.subtitleLabel.textColor = secondary;
@@ -581,7 +584,7 @@ NSArray<UIColor *> *SonoraResolvedWavePalette(UIImage * _Nullable image);
 }
 
 - (void)updateArtworkBasedBackgroundForTrack:(SonoraTrack * _Nullable)track {
-    if (!SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled() || track.artwork == nil) {
+    if (SonoraSettingsPlayerBackgroundMode() != SonoraPlayerBackgroundModeArtwork || track.artwork == nil) {
         self.currentArtworkBackgroundColor = nil;
         self.backgroundGradientLayer.colors = nil;
         return;

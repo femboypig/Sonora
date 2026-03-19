@@ -12,6 +12,7 @@ static NSString * const SonoraSettingsPreservePlayerModesKey = @"sonora.settings
 static NSString * const SonoraSettingsTrackGapKey = @"sonora.settings.trackGapSeconds";
 static NSString * const SonoraSettingsMyWaveLookKey = @"sonora.settings.myWaveLook";
 static NSString * const SonoraSettingsStreamingSearchEngineKey = @"sonora.settings.streamingSearchEngine";
+static NSString * const SonoraSettingsPlayerBackgroundModeKey = @"sonora.settings.playerBackgroundMode";
 static NSString * const SonoraSettingsArtworkBasedPlayerBackgroundKey = @"sonora.settings.useArtworkBasedPlayerBackground";
 static NSString * const SonoraSettingsAccentAppBackgroundKey = @"sonora.settings.useAccentAppBackground";
 static NSString * const SonoraSettingsAppBackgroundHexKey = @"sonora.settings.appBackgroundHex";
@@ -90,16 +91,40 @@ void SonoraSettingsSetStreamingSearchEngine(SonoraStreamingSearchEngine value) {
     [SonoraSettingsDefaults() setInteger:rawValue forKey:SonoraSettingsStreamingSearchEngineKey];
 }
 
-BOOL SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled(void) {
+SonoraPlayerBackgroundMode SonoraSettingsPlayerBackgroundMode(void) {
     NSUserDefaults *defaults = SonoraSettingsDefaults();
-    if ([defaults objectForKey:SonoraSettingsArtworkBasedPlayerBackgroundKey] == nil) {
-        return YES;
+    if ([defaults objectForKey:SonoraSettingsPlayerBackgroundModeKey] != nil) {
+        NSInteger rawValue = [defaults integerForKey:SonoraSettingsPlayerBackgroundModeKey];
+        if (rawValue == SonoraPlayerBackgroundModeApp || rawValue == SonoraPlayerBackgroundModeArtwork) {
+            return (SonoraPlayerBackgroundMode)rawValue;
+        }
+        return SonoraPlayerBackgroundModeSystem;
     }
-    return [defaults boolForKey:SonoraSettingsArtworkBasedPlayerBackgroundKey];
+
+    if ([defaults objectForKey:SonoraSettingsArtworkBasedPlayerBackgroundKey] != nil &&
+        [defaults boolForKey:SonoraSettingsArtworkBasedPlayerBackgroundKey]) {
+        return SonoraPlayerBackgroundModeArtwork;
+    }
+    return SonoraPlayerBackgroundModeSystem;
+}
+
+void SonoraSettingsSetPlayerBackgroundMode(SonoraPlayerBackgroundMode mode) {
+    SonoraPlayerBackgroundMode normalized = SonoraPlayerBackgroundModeSystem;
+    if (mode == SonoraPlayerBackgroundModeApp || mode == SonoraPlayerBackgroundModeArtwork) {
+        normalized = mode;
+    }
+    NSUserDefaults *defaults = SonoraSettingsDefaults();
+    [defaults setInteger:normalized forKey:SonoraSettingsPlayerBackgroundModeKey];
+    [defaults setBool:(normalized == SonoraPlayerBackgroundModeArtwork)
+               forKey:SonoraSettingsArtworkBasedPlayerBackgroundKey];
+}
+
+BOOL SonoraSettingsUseArtworkBasedPlayerBackgroundEnabled(void) {
+    return SonoraSettingsPlayerBackgroundMode() == SonoraPlayerBackgroundModeArtwork;
 }
 
 void SonoraSettingsSetUseArtworkBasedPlayerBackgroundEnabled(BOOL enabled) {
-    [SonoraSettingsDefaults() setBool:enabled forKey:SonoraSettingsArtworkBasedPlayerBackgroundKey];
+    SonoraSettingsSetPlayerBackgroundMode(enabled ? SonoraPlayerBackgroundModeArtwork : SonoraPlayerBackgroundModeSystem);
 }
 
 BOOL SonoraSettingsUseAccentAppBackgroundEnabled(void) {
