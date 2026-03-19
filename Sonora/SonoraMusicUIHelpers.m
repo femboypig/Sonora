@@ -109,20 +109,18 @@ static UIColor * _Nullable SonoraCurrentArtworkAppBackgroundSourceColor(UITraitC
         return nil;
     }
 
-    NSArray<UIColor *> *palette = SonoraResolvedWavePalette(artwork);
-    UIColor *candidate = nil;
-    if (palette.count >= 4) {
-        candidate = SonoraBlendColors(
-            palette[0],
-            SonoraBlendColors(palette[1], palette[2], 0.28),
-            0.34
-        );
-    } else if (palette.count > 0) {
-        candidate = palette.firstObject;
+    static NSString *cachedTrackIdentifier = nil;
+    static UIColor *cachedCandidate = nil;
+
+    NSString *trackIdentifier = track.identifier ?: @"";
+    if (cachedCandidate != nil && [cachedTrackIdentifier isEqualToString:trackIdentifier]) {
+        return [cachedCandidate resolvedColorWithTraitCollection:trait];
     }
-    if (candidate == nil) {
-        candidate = [SonoraArtworkAccentColorService dominantAccentColorForImage:artwork fallback:UIColor.systemBackgroundColor];
-    }
+
+    UIColor *candidate = [SonoraArtworkAccentColorService dominantAccentColorForImage:artwork
+                                                                             fallback:UIColor.systemBackgroundColor];
+    cachedTrackIdentifier = [trackIdentifier copy];
+    cachedCandidate = candidate;
     return [candidate resolvedColorWithTraitCollection:trait];
 }
 
